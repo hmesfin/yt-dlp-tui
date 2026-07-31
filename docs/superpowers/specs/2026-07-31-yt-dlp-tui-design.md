@@ -138,10 +138,22 @@ field in the template must carry a default.
 Playlist position comes from `info.playlist_index` / `info.n_entries` in the
 template, not from scraping `Downloading item N of M`.
 
-**Unverified, to confirm during implementation:** `--progress-template` accepts
-a `[TYPES:]` prefix, so a `postprocess:` template should give progress during
-ffmpeg merge and audio extraction. Without it, a long extraction is dead air in
-the UI. Confirm before relying on it.
+**Verified 2026-07-31 (was previously unconfirmed):** `--progress-template`
+accepts a `[TYPES:]` prefix, and a second `--progress-template
+'postprocess:PP:{…}'` flag coexists with the download one. It emits
+`{"st":"started"|"finished","pp":"ExtractAudio"}` per postprocessor.
+
+Important limit: postprocess events carry **no byte or percentage progress** —
+only start and finish per stage. The UI can therefore show "Extracting audio…"
+as an indeterminate status but cannot show a percentage during ffmpeg work.
+
+Also verified: `_type` in the probe JSON is `"video"` vs `"playlist"`, which is
+the playlist-detection mechanism; and `playlist_count` is returned even under
+`--playlist-items 1`, so the probe stays cheap on large channels.
+
+The comma-fallback template syntax `%(progress.total_bytes,progress.total_bytes_estimate|0)j`
+parses and runs. Used defensively for live/DASH streams lacking `total_bytes`;
+note the fallback branch itself has not been exercised.
 
 ### yt-dlp version: pinned, not system
 
