@@ -122,7 +122,10 @@ async def probe(url: str, *, ytdlp: str = "yt-dlp", timeout: float = 20.0) -> Pr
     proc = await asyncio.create_subprocess_exec(
       *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
     )
-  except OSError:
+  except (OSError, ValueError, TypeError):
+    # OSError: binary missing/not executable. ValueError: e.g. a NUL byte in
+    # `url` (create_subprocess_exec rejects it outright). Pasted/typed URLs
+    # are untrusted input, so this must degrade like any other probe failure.
     return ProbeResult.failed()
   try:
     stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)

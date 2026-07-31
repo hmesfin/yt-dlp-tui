@@ -168,6 +168,13 @@ async def test_probe_returns_failed_when_binary_is_missing() -> None:
   assert r.ok is False
 
 
+async def test_probe_returns_failed_on_nul_byte_in_url(tmp_path: Path) -> None:
+  # create_subprocess_exec raises ValueError on an embedded NUL byte; a typed
+  # or pasted URL is untrusted input and must degrade, not crash the worker.
+  r = await probe("bad\0url", ytdlp=_fake_ytdlp(tmp_path))
+  assert r.ok is False
+
+
 async def test_probe_returns_failed_and_kills_child_on_timeout(tmp_path: Path) -> None:
   pid_file = tmp_path / "pid"
   r = await probe(f"HANG:{pid_file}", ytdlp=_fake_ytdlp(tmp_path), timeout=0.3)
