@@ -120,20 +120,35 @@ Instead, hand yt-dlp a template and it emits whatever shape we ask for:
   'PROG:{"bytes":%(progress.downloaded_bytes|0)j,"total":%(progress.total_bytes|0)j,
          "spd":%(progress.speed|0)j,"eta":%(progress.eta|0)j,
          "idx":%(info.playlist_index|0)j,"n":%(info.n_entries|0)j,
-         "title":%(info.title|)j}'
+         "title":%(info.title|"")j}'
 ```
 
 - `--newline` stops carriage-return redraws, so each update is its own line.
 - `j` is JSON encoding of the field.
-- `|0` supplies a default.
+- `|0` / `|""` supplies a default.
 
 **Verified 2026-07-31** against a real download (Big Buck Bunny,
 `aqz-KE-bpKQ`): the template emits one valid-JSON line per update.
 
-**Gotcha, verified:** without the `|default`, missing values render as bare
+**Gotcha 1, verified:** without any `|default`, missing values render as bare
 `NA`, which is invalid JSON. The final progress line emits `"eta":NA` and a
-naive `json.loads` throws exactly at completion. `%(field|0)j` fixes it; every
-field in the template must carry a default.
+naive `json.loads` throws exactly at completion.
+
+**Gotcha 2, verified 2026-07-31 during implementation — a `|default` alone is
+not sufficient.** When a field's value is `None`, yt-dlp substitutes the default
+as a raw literal and *skips the `j` JSON conversion entirely* (`create_key()`
+sets `value, fmt = default, 's'` before the `j` branch is reached). So an empty
+default renders nothing at all:
+
+| template | value | renders | result |
+|---|---|---|---|
+| `%(info.title\|)j` | `None` | `{"title":}` | invalid JSON |
+| `%(info.title\|"")j` | `None` | `{"title":""}` | valid |
+| `%(progress.eta\|0)j` | `None` | `{"eta":0}` | valid |
+
+Numeric defaults are safe only by coincidence — a bare `0` is already valid
+JSON. **String fields must quote the default: `|""`, not `|`.** Every field
+needs a default, and that default must itself be valid JSON.
 
 Playlist position comes from `info.playlist_index` / `info.n_entries` in the
 template, not from scraping `Downloading item N of M`.
