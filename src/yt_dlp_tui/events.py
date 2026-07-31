@@ -49,6 +49,10 @@ Event = ProgressEvent | PostProcessEvent | LogEvent | DoneEvent
 
 def _progress(payload: str) -> ProgressEvent:
   d = json.loads(payload)
+  if not isinstance(d, dict):
+    # A JSON scalar/list/null is valid JSON but not a valid payload shape;
+    # raise so the caller's except tuple below routes it to a LogEvent.
+    raise TypeError("progress payload is not a JSON object")
   return ProgressEvent(
     downloaded=int(d.get("b") or 0),
     total=int(d.get("t") or 0),
@@ -62,6 +66,8 @@ def _progress(payload: str) -> ProgressEvent:
 
 def _postprocess(payload: str) -> PostProcessEvent:
   d = json.loads(payload)
+  if not isinstance(d, dict):
+    raise TypeError("postprocess payload is not a JSON object")
   return PostProcessEvent(status=str(d.get("st") or ""), processor=str(d.get("pp") or ""))
 
 

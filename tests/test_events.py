@@ -1,3 +1,5 @@
+import pytest
+
 from yt_dlp_tui.events import (
   DoneEvent,
   LogEvent,
@@ -65,3 +67,55 @@ def test_trailing_whitespace_is_tolerated():
 def test_done_event_reports_success():
   assert DoneEvent(returncode=0).ok is True
   assert DoneEvent(returncode=1).ok is False
+
+
+@pytest.mark.parametrize(
+  "line",
+  [
+    "PROG:5",
+    "PROG:[1,2]",
+    'PROG:"x"',
+    "PROG:true",
+    "PROG:null",
+  ],
+)
+def test_non_object_progress_payload_degrades_to_log_and_does_not_raise(line):
+  ev = parse_line(line)
+  assert isinstance(ev, LogEvent)
+
+
+@pytest.mark.parametrize(
+  "line",
+  [
+    "PP:5",
+    "PP:[1,2]",
+    'PP:"x"',
+    "PP:true",
+    "PP:null",
+  ],
+)
+def test_non_object_postprocess_payload_degrades_to_log_and_does_not_raise(line):
+  ev = parse_line(line)
+  assert isinstance(ev, LogEvent)
+
+
+PATHOLOGICAL_LINES = [
+  BARE_NA,
+  "PROG:{}",
+  'PROG:{"b":',
+  "PROG:5",
+  "PROG:[1,2]",
+  'PROG:"x"',
+  "PROG:true",
+  "PROG:null",
+  "PP:5",
+  "PP:[1,2]",
+  'PP:"x"',
+  "PP:true",
+  "PP:null",
+]
+
+
+def test_parse_line_never_raises_on_pathological_input():
+  for line in PATHOLOGICAL_LINES:
+    parse_line(line)  # must not raise
