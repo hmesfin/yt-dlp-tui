@@ -14,6 +14,14 @@ POSTPROCESS_PREFIX = "PP:"
 
 # Every field carries a |default: without one, missing values render as bare
 # `NA`, which is invalid JSON and throws on the final progress line.
+#
+# String fields need a *quoted* default (|"" not |): yt-dlp's create_key()
+# substitutes the default as a raw literal and skips the json ('j') conversion
+# entirely when the value is None (see YoutubeDL.py, `if value is None:
+# value, fmt = default, 's'` runs before the `elif fmt[-1] == 'j'` branch). A
+# bare `|` default renders as `"title":` with nothing after the colon, which
+# is invalid JSON. Numeric `|0` defaults are safe only because a bare `0` is
+# itself valid JSON.
 PROGRESS_TEMPLATE = (
   PROGRESS_PREFIX + "{"
   '"b":%(progress.downloaded_bytes|0)j,'
@@ -22,13 +30,13 @@ PROGRESS_TEMPLATE = (
   '"e":%(progress.eta|0)j,'
   '"i":%(info.playlist_index|0)j,'
   '"n":%(info.n_entries|0)j,'
-  '"title":%(info.title|)j'
+  '"title":%(info.title|"")j'
   "}"
 )
 POSTPROCESS_TEMPLATE = (
   "postprocess:" + POSTPROCESS_PREFIX + "{"
-  '"st":%(progress.status|)j,'
-  '"pp":%(progress.postprocessor|)j'
+  '"st":%(progress.status|"")j,'
+  '"pp":%(progress.postprocessor|"")j'
   "}"
 )
 

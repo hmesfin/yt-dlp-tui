@@ -41,9 +41,17 @@ def test_progress_templates_are_attached_with_defaults():
   download_tpl = next(t for t in templates if t.startswith(PROGRESS_PREFIX))
   pp_tpl = next(t for t in templates if t.startswith("postprocess:"))
   assert POSTPROCESS_PREFIX in pp_tpl
-  # every interpolated field must carry a |default, or NA breaks json.loads
-  for field in download_tpl.split("%(")[1:]:
-    assert "|" in field.split(")")[0]
+  # Every interpolated field in BOTH templates must carry a non-empty default.
+  # A bare `|` (no default value) still contains "|" but renders as nothing
+  # after the colon when the value is None -- yt-dlp substitutes the default
+  # as a raw literal and skips the json ('j') conversion in that case, so an
+  # empty default breaks json.loads just like a missing one would.
+  for tpl in (download_tpl, pp_tpl):
+    for field in tpl.split("%(")[1:]:
+      key_and_default = field.split(")")[0]
+      assert "|" in key_and_default, f"missing default in {key_and_default!r}"
+      default_value = key_and_default.split("|", 1)[1]
+      assert default_value != "", f"empty default in {key_and_default!r}"
 
 
 def test_newline_and_no_colors_are_set():
