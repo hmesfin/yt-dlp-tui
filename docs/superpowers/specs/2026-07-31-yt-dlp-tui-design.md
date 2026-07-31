@@ -249,7 +249,12 @@ typed, and it appears in the previewed command so its effect is visible.
 - Probe failure: non-blocking, as above.
 - Download failure: exit code plus trailing stderr shown in the log, and a copy
   command key so the exact invocation can be rerun outside the TUI to debug.
-- Ctrl-C: SIGINT to the child so yt-dlp cleans up its own partial files.
+- Cancel: SIGTERM to the child's whole process group, escalating to SIGKILL if
+  it does not exit. yt-dlp hands its pipes to ffmpeg and aria2c, so signalling
+  the child alone orphans those helpers. The child is spawned with
+  `start_new_session=True` to make the group ours to signal; the cost is that
+  Ctrl-C at the terminal no longer reaches yt-dlp directly, so the TUI owns
+  stopping every active run on exit.
 - Malformed `PROG:` line: skipped, logged at debug, never crashes the UI.
 
 ## Testing
