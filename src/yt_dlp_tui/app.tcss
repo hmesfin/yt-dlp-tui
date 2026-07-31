@@ -1,0 +1,6 @@
+/* src/yt_dlp_tui/app.tcss */
+Screen { layout: vertical; }
+#url-input { margin: 1 2 0 2; }
+#meta { margin: 0 2; color: $text-muted; height: 1; }
+#preset-list { margin: 1 2; height: auto; max-height: 10; border: round $panel; }
+#command-preview { margin: 0 2 1 2; color: $text-muted; height: auto; }
