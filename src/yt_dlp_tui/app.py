@@ -22,7 +22,17 @@ from yt_dlp_tui.screens.main import MainScreen
 class YtDlpTuiApp(App):
   CSS_PATH = "app.tcss"
   TITLE = "yt-dlp-tui"
-  BINDINGS: ClassVar[list[tuple[str, str, str]]] = [("q", "quit", "quit")]
+  # "q" yields to typing: AUTO_FOCUS puts focus on the URL input at mount,
+  # Input claims every printable key for itself (Input.check_consume_key),
+  # and Screen._binding_chain strips a claimed key out of the Screen/App
+  # bindings map before dispatch even considers them -- so "q" only quits
+  # once the URL box isn't focused (see MainScreen's "escape" binding).
+  # "ctrl+q" produces no printable character, so Input never claims it: it
+  # is the always-live escape hatch regardless of focus.
+  BINDINGS: ClassVar[list[tuple[str, str, str]]] = [
+    ("q", "quit", "quit"),
+    ("ctrl+q", "quit", ""),
+  ]
 
   url: reactive[str] = reactive("")
   probe_result: reactive[ProbeResult | None] = reactive(None)

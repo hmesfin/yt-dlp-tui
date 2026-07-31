@@ -24,9 +24,18 @@ from yt_dlp_tui.probe import probe
 
 
 class MainScreen(Screen):
+  # "a" is filtered out of this Screen's bindings (by Input.check_consume_key
+  # via Screen._binding_chain) while the URL input has focus, same as "q" on
+  # the App -- typing wins. "escape" produces no printable character, so it
+  # is never claimed by the Input and is always reachable: it blurs the URL
+  # box, and once nothing owns the letter keys "a" fires normally. There is
+  # no BINDINGS entry for "enter": Input owns it for its own submit action
+  # (see on_input_submitted below), and a Screen-level entry for a key an
+  # ancestor never actually receives while Input is focused would be dead
+  # weight, not a real affordance.
   BINDINGS: ClassVar[list[tuple[str, str, str]]] = [
+    ("escape", "blur_url", ""),
     ("a", "advanced", "advanced"),
-    ("enter", "download", "download"),
   ]
 
   def compose(self) -> ComposeResult:
@@ -43,18 +52,28 @@ class MainScreen(Screen):
     self.refresh_preview()
 
   async def refresh_presets(self) -> None:
-    # `ListView.clear()`/`.append()` are only "optionally awaitable" when
-    # there is a single call in flight: `clear()` posts a `Prune` message and
-    # detaches children once that message is processed, it does not remove
-    # them from the node list synchronously. Firing `clear()` and `append()`
-    # back-to-back without awaiting -- which is what an un-awaited call looks
-    # like -- lets a second refresh (e.g. from a probe result arriving) run
-    # `append()` before the previous `clear()`'s removals have landed,
-    # raising `DuplicateIds` on the reused `preset-<id>` widget ids.
+    # `ListView.clear()`/`.append()`/`.extend()` are only "optionally
+    # awaitable" when there is a single call in flight: `clear()` posts a
+    # `Prune` message and detaches children once that message is processed,
+    # it does not remove them from the node list synchronously. Firing
+    # `clear()` and a mount back-to-back without awaiting -- which is what an
+    # un-awaited call looks like -- lets a second refresh (e.g. from a probe
+    # result arriving) mount before the previous `clear()`'s removals have
+    # landed, raising `DuplicateIds` on the reused `preset-<id>` widget ids.
     listing = self.query_one("#preset-list", ListView)
     await listing.clear()
-    for preset in self.app.ordered_presets:
-      await listing.append(ListItem(Static(preset.name), id=f"preset-{preset.id}"))
+    items = [
+      ListItem(Static(preset.name), id=f"preset-{preset.id}") for preset in self.app.ordered_presets
+    ]
+    await listing.extend(items)
+    # `ListView` composed empty and populated here: its own `_on_mount` only
+    # sets `index` when `self.children` is non-empty *at mount time*, which
+    # it never is for us, so nothing ever highlights a row on its own. Set it
+    # explicitly on every rebuild -- including reorders -- so there is always
+    # a visible selection and so a reorder actually steers `selected_preset`
+    # (via the `Highlighted` message this posts, handled below). `validate_index`
+    # clamps this to `None` on its own if `items` is empty.
+    listing.index = 0
 
   def refresh_preview(self) -> None:
     cmd = self.app.current_command()
@@ -62,16 +81,29 @@ class MainScreen(Screen):
 
   async def on_input_changed(self, event: Input.Changed) -> None:
     self.app.url = event.value
+    # The old title/duration belongs to whatever URL was there before this
+    # edit -- clear it immediately rather than leaving it on screen (forever,
+    # if the field is edited down to empty, since an empty URL never
+    # re-probes below).
+    self.query_one("#meta", Static).update("")
     if event.value.strip():
       self.run_worker(self._probe(event.value), exclusive=True)
 
   async def on_input_submitted(self, event: Input.Submitted) -> None:
-    # `Input` binds "enter" to its own `action_submit` (which posts this
-    # message) before a Screen-level BINDINGS entry for "enter" ever sees the
-    # key -- the Screen binding below stays only so the Footer keeps showing
-    # "enter: download"; this is what actually fires it while the URL input
-    # (the widget AUTO_FOCUS puts focus on) is focused.
+    # `Input` owns "enter" for its own `action_submit`, which posts this
+    # message rather than falling through to a Screen-level binding -- this
+    # is the actual (and only) way "download" fires while the URL input is
+    # focused, which is where `AUTO_FOCUS` puts focus at mount and where it
+    # stays for as long as the user is typing a URL.
     self.action_download()
+
+  def action_blur_url(self) -> None:
+    # "escape" is the owner-approved way out of the URL input: it produces
+    # no printable character, so Input never claims it the way it claims
+    # every letter (see MainScreen.BINDINGS), and it is always reachable.
+    # Un-focusing (rather than moving focus to the next widget) is the
+    # simplest thing that reliably unblocks "a" at the Screen level.
+    self.set_focus(None)
 
   async def _probe(self, url: str) -> None:
     result = await probe(url, ytdlp=self.app.tooling.ytdlp or "yt-dlp")
