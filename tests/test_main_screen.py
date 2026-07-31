@@ -36,13 +36,28 @@ from a naive transcription of the plan and are called out inline:
   quits; `enter` inside the box triggers download via `Input.Submitted`,
   never via a BINDINGS entry.
 
-Only one test below types a real, non-empty URL into `#url-input` (the only
-path to `on_input_changed` -> `_probe`); it monkeypatches
-`yt_dlp_tui.screens.main.probe` first, so no real subprocess or network call
-happens anywhere in this file. `tooling` and `presets` are also injected on
-every app so the suite never reads a real config file or shells out to
-detect `yt-dlp`/`ffmpeg`.
+Several tests press printable keys into a focused `#url-input`, which fires
+real `Input.Changed` events -> `on_input_changed` -> an unconditional
+`self.run_worker(self._probe(event.value), exclusive=True)` for any
+non-empty value. That is a real subprocess spawn
+(`asyncio.create_subprocess_exec` on whatever `yt-dlp` resolves to on PATH)
+if left alone, and it is not safe to reason about test-by-test which
+keypresses are "non-empty enough" to trigger it -- a prior round of this
+file got that wrong (a test that pressed "a" then "q" typed `"aq"` into the
+box, which happened to make the real `yt-dlp` exit immediately on today's
+machine only because it rejects `"aq"` as an invalid URL; a different string,
+or a different `yt-dlp` on PATH, and the offline suite makes a network
+call). So the guarantee is structural instead: the autouse `_stub_probe`
+fixture below monkeypatches `yt_dlp_tui.screens.main.probe` for *every* test
+in this file, before any of them run, whether or not that test's author
+remembered a real URL could reach it. A test that needs different probe
+behaviour (see `test_typing_a_url_updates_state_and_replaces_stale_meta`)
+overrides it locally with the same `monkeypatch` fixture instance. `tooling`
+and `presets` are also injected on every app so the suite never reads a real
+config file or shells out to detect `yt-dlp`/`ffmpeg`.
 """
+
+import asyncio
 
 import pytest
 from textual.widgets import Input, ListView, Static
@@ -53,6 +68,18 @@ from yt_dlp_tui.probe import ProbeResult, Tooling
 from yt_dlp_tui.screens import main as main_screen_module
 
 OFFLINE_TOOLING = Tooling(ytdlp=None, ffmpeg=None)
+
+
+@pytest.fixture(autouse=True)
+def _stub_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+  """Structural guarantee, not per-test discipline: no test in this file can
+  reach a real subprocess through `_probe`, regardless of what gets typed
+  into `#url-input`, because `probe` is never the real one to begin with."""
+
+  async def default_fake_probe(url: str, *, ytdlp: str) -> ProbeResult:
+    return ProbeResult(title="Stubbed Title", duration=90, extractor="Fake")
+
+  monkeypatch.setattr(main_screen_module, "probe", default_fake_probe)
 
 
 def _make_app() -> YtDlpTuiApp:
@@ -221,17 +248,25 @@ async def test_ctrl_q_quits_after_escape() -> None:
 async def test_typing_a_url_updates_state_and_replaces_stale_meta(
   monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-  """The only test that drives `on_input_changed` -> `_probe` for real, so it
-  monkeypatches `probe` at the module level `screens.main` imported it under
-  -- a real subprocess is never spawned. Covers two things nothing else in
-  this file does: that Textual actually routes `Input.Changed` to the
-  handler that sets `app.url`, and that `#meta` doesn't keep showing a
-  previous URL's title once the user starts editing."""
+  """Drives `on_input_changed` -> `_probe` for real (the autouse fixture
+  above keeps `probe` fake, so no real subprocess is spawned). Covers two
+  things nothing else in this file does: that Textual actually routes
+  `Input.Changed` to the handler that sets `app.url`, and that `#meta`
+  doesn't keep showing a previous URL's title once the user starts editing.
 
-  async def fake_probe(url: str, *, ytdlp: str) -> ProbeResult:
+  The staleness half only bites during the window between the edit and the
+  probe completing -- `on_input_changed`'s own clear vs. `_probe`'s eventual
+  overwrite land at the same "instant" if the fake probe resolves
+  immediately, and the assertion would pass even with the clear deleted. So
+  this overrides the autouse default with a fake that blocks on an
+  `asyncio.Event` this test controls, to make that window observable."""
+  probe_may_finish = asyncio.Event()
+
+  async def gated_fake_probe(url: str, *, ytdlp: str) -> ProbeResult:
+    await probe_may_finish.wait()
     return ProbeResult(title="Stubbed Title", duration=90, extractor="Fake")
 
-  monkeypatch.setattr(main_screen_module, "probe", fake_probe)
+  monkeypatch.setattr(main_screen_module, "probe", gated_fake_probe)
   app = _make_app()
   async with app.run_test() as pilot:
     await pilot.pause()
@@ -241,6 +276,13 @@ async def test_typing_a_url_updates_state_and_replaces_stale_meta(
     await pilot.press("a", "b", "c")
     await pilot.pause()
 
+    # The probe for "abc" is still blocked on probe_may_finish -- if the
+    # interim clear in on_input_changed didn't run, this would still read
+    # the pre-edit "stale title..." here.
     assert app.url == "abc"
-    assert "stale title" not in str(meta.content)
+    assert str(meta.content) == ""
+
+    probe_may_finish.set()
+    await pilot.pause()
+
     assert "Stubbed Title" in str(meta.content)
