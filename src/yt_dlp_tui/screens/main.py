@@ -6,10 +6,9 @@ driven back by `YtDlpTuiApp`'s `watch_*` methods (see app.py) so there is a
 single place that decides what a state change should redraw, rather than
 every event handler re-deriving it.
 
-Deliberate stub: `action_advanced` and `action_download` are replaced by
-Tasks 8 and 9, which will add a top-of-file import for the screen they push
-(`advanced.py` / `run.py` never import this module or app.py, so there is no
-cycle to work around with a function-level import).
+`action_advanced` pushes `AdvancedScreen` (Task 8). `action_download` remains
+a stub for Task 9 (`run.py` never imports this module or app.py, so there is
+no cycle to work around with a function-level import there either).
 """
 
 import shlex
@@ -21,6 +20,7 @@ from textual.screen import Screen
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 
 from yt_dlp_tui.probe import probe
+from yt_dlp_tui.screens.advanced import AdvancedScreen
 
 
 class MainScreen(Screen):
@@ -124,7 +124,7 @@ class MainScreen(Screen):
     self.app.selected_preset = next(p for p in self.app.presets if p.id == preset_id)
 
   def action_advanced(self) -> None:
-    self.notify("Advanced options arrive in Task 8.")
+    self.app.push_screen(AdvancedScreen())
 
   def action_download(self) -> None:
     self.notify("The run screen arrives in Task 9.")
