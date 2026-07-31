@@ -132,6 +132,18 @@ async def probe(url: str, *, ytdlp: str = "yt-dlp", timeout: float = 20.0) -> Pr
   except TimeoutError:
     await _kill(proc)
     return ProbeResult.failed()
+  except asyncio.CancelledError:
+    # Task 7 runs probe() under an exclusive worker, so an ordinary keystroke
+    # cancels an in-flight probe long before the timeout above ever fires --
+    # that path must not leak the child either. A second cancellation can
+    # land on any `await` here, so this must not await anything: send SIGKILL
+    # outright and let the event loop's own SIGCHLD bookkeeping reap it in
+    # the background. Cancellation still propagates -- swallowing it would
+    # break Textual's worker semantics.
+    if proc.returncode is None:
+      with contextlib.suppress(ProcessLookupError):
+        proc.kill()
+    raise
   if proc.returncode != 0:
     return ProbeResult.failed()
   return parse_probe_json(stdout.decode("utf-8", errors="replace"))

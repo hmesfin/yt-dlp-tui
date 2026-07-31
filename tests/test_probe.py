@@ -119,6 +119,12 @@ if url == "GOOD":
   sys.exit(0)
 elif url == "FAIL":
   sys.exit(1)
+elif url.startswith("ARGV:"):
+  with open(url.split(":", 1)[1], "w") as f:
+    json.dump(sys.argv, f)
+  print(json.dumps({"_type": "video", "title": "T", "duration": 5,
+                     "extractor_key": "X", "playlist_count": None}))
+  sys.exit(0)
 elif url.startswith("HANG:"):
   with open(url.split(":", 1)[1], "w") as f:
     f.write(str(os.getpid()))
@@ -138,6 +144,23 @@ def _fake_ytdlp(tmp_path: Path) -> str:
   script.write_text(_FAKE_YTDLP)
   script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
   return str(script)
+
+
+async def _read_pid(pid_file: Path, timeout: float = 5.0) -> int:
+  """Wait for `pid_file` to contain a parseable pid.
+
+  The fake script opens the file (creating it, empty) before writing to it,
+  so a read that lands in that window sees "" and int() raises ValueError.
+  Retrying until the content actually parses removes that race instead of
+  merely narrowing it.
+  """
+  deadline = time.monotonic() + timeout
+  while time.monotonic() < deadline:
+    try:
+      return int(pid_file.read_text())
+    except (FileNotFoundError, ValueError):
+      await asyncio.sleep(0.02)
+  raise AssertionError(f"{pid_file} never became a parseable pid")
 
 
 def _wait_until_gone(pid: int, timeout: float = 5.0) -> None:
@@ -179,10 +202,7 @@ async def test_probe_returns_failed_and_kills_child_on_timeout(tmp_path: Path) -
   pid_file = tmp_path / "pid"
   r = await probe(f"HANG:{pid_file}", ytdlp=_fake_ytdlp(tmp_path), timeout=0.3)
   assert r.ok is False
-  deadline = time.monotonic() + 5.0
-  while not pid_file.exists() and time.monotonic() < deadline:
-    await asyncio.sleep(0.02)
-  pid = int(pid_file.read_text())
+  pid = await _read_pid(pid_file)
   _wait_until_gone(pid)
 
 
@@ -193,8 +213,40 @@ async def test_probe_escalates_to_sigkill_when_child_ignores_sigterm(
   pid_file = tmp_path / "pid"
   r = await probe(f"IGNORESIG:{pid_file}", ytdlp=_fake_ytdlp(tmp_path), timeout=0.3)
   assert r.ok is False
-  deadline = time.monotonic() + 5.0
-  while not pid_file.exists() and time.monotonic() < deadline:
-    await asyncio.sleep(0.02)
-  pid = int(pid_file.read_text())
+  pid = await _read_pid(pid_file)
   _wait_until_gone(pid)
+
+
+async def test_cancelling_probe_kills_its_child(tmp_path: Path) -> None:
+  # Task 7 runs probe() under `run_worker(..., exclusive=True)` on every URL
+  # change, so an ordinary keystroke cancels an in-flight probe long before
+  # its 20s timeout -- the timeout-side _kill() never runs on this path.
+  pid_file = tmp_path / "pid"
+  task = asyncio.ensure_future(probe(f"HANG:{pid_file}", ytdlp=_fake_ytdlp(tmp_path), timeout=20.0))
+  pid = await _read_pid(pid_file)
+  task.cancel()
+  with pytest.raises(asyncio.CancelledError):
+    await task
+  _wait_until_gone(pid)
+
+
+async def test_probe_builds_the_expected_argv(tmp_path: Path) -> None:
+  # The fake yt-dlp only branches on the trailing url argument, so dropping
+  # --playlist-items 1, --flat-playlist, or the `--` separator would not fail
+  # any other test here -- it would just make a real probe slow or wrong.
+  argv_file = tmp_path / "argv.json"
+  ytdlp = _fake_ytdlp(tmp_path)
+  url = f"ARGV:{argv_file}"
+  r = await probe(url, ytdlp=ytdlp)
+  assert r.ok is True
+  argv = json.loads(argv_file.read_text())
+  assert argv == [
+    ytdlp,
+    "-J",
+    "--no-warnings",
+    "--flat-playlist",
+    "--playlist-items",
+    "1",
+    "--",
+    url,
+  ]
