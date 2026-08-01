@@ -144,8 +144,15 @@ class MainScreen(Screen):
     # landed, raising `DuplicateIds` on the reused `preset-<id>` widget ids.
     listing = self.query_one("#preset-list", ListView)
     await listing.clear()
+    # markup=False on the row's Static for the same reason as #meta and
+    # #command-preview above: `preset.name` comes out of the user's
+    # config.toml, which the README tells people to write. "Lossless [FLAC]
+    # rip" renders as "Lossless  rip" with markup on, and a name containing
+    # "[/b]" raises MarkupError out of this very call during `on_mount`, so
+    # the app never finishes starting.
     items = [
-      ListItem(Static(preset.name), id=f"preset-{preset.id}") for preset in self.app.ordered_presets
+      ListItem(Static(preset.name, markup=False), id=f"preset-{preset.id}")
+      for preset in self.app.ordered_presets
     ]
     await listing.extend(items)
     # `ListView` composed empty and populated here: its own `_on_mount` only
@@ -248,5 +255,8 @@ class MainScreen(Screen):
       self.app.push_screen(RunScreen(self.app.current_command()))
     else:
       # Pressing enter on an empty box and getting nothing at all reads as a
-      # broken key, not as a missing URL.
-      self.notify("Enter a URL first.")
+      # broken key, not as a missing URL. markup=False even though this
+      # string is a fixed literal this module owns: the project rule is that
+      # nothing on these screens renders with markup on, so there is no site
+      # left for the next person to copy the wrong default from.
+      self.notify("Enter a URL first.", markup=False)

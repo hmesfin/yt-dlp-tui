@@ -30,6 +30,7 @@ namespace to stop at. This is verified below with real `pilot.press(...)`
 keypresses, not merely reasoned about.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,29 @@ def _stub_probe(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _make_app() -> YtDlpTuiApp:
   return YtDlpTuiApp(presets=BUILTIN_PRESETS, tooling=OFFLINE_TOOLING)
+
+
+def _toast_text(app: YtDlpTuiApp) -> str:
+  """Every rendered line of every live `Toast`, whitespace-collapsed.
+
+  Queried by CSS type selector rather than by importing `textual.widgets._toast`
+  (private), and read off `render_line` rather than the stored notification
+  message -- the message is the raw string whether or not markup is on, so only
+  the rendered line can show markup having eaten part of it.
+  """
+  lines = [
+    toast.render_line(y).text
+    for toast in app.screen.query("Toast")
+    for y in range(toast.size.height)
+  ]
+  return re.sub(r"\s+", " ", " ".join(lines)).strip()
+
+
+async def _save_with(app: YtDlpTuiApp, field: str, value: str) -> None:
+  await app.push_screen(AdvancedScreen())
+  screen = app.screen
+  screen.query_one(f"#{field}", Input).value = value
+  screen.action_save()
 
 
 async def test_saving_overrides_updates_the_app() -> None:
@@ -378,3 +402,44 @@ async def test_unterminated_quote_in_extra_args_notifies_the_user(
     assert notifications, "expected a notify() call warning about the dropped extra args"
     assert notifications[0][1].get("severity") == "warning"
     assert app.screen is not screen  # save still pops -- not authorized to keep it open
+
+
+# `notify()` markup (final whole-branch review, finding C4)
+#
+# Every notify test above monkeypatches `screen.notify`, so none of them ever
+# renders a `Toast` -- and neither does anything else in this suite:
+# `App.run_test()` sets `_disable_notifications = not notifications` and
+# `notifications` defaults to `False`, so zero `Toast` widgets mount under the
+# default harness. The two tests below pass `notifications=True` on purpose;
+# they are the only place in the project where a notification is actually
+# drawn.
+
+
+async def test_notify_echoes_a_bracketed_value_verbatim() -> None:
+  """`App.notify` defaults `markup=True` and `Toast.render` runs the message
+  through `Content.from_markup`, so a bracketed run in the user's own input is
+  eaten before it reaches the screen. That is precisely the silent-loss failure
+  these two notifies exist to prevent: the toast would report a *different*
+  value than the one that was dropped."""
+  app = _make_app()
+  async with app.run_test(notifications=True) as pilot:
+    await _save_with(app, "opt-extra", '[bold]x "oops')
+    await pilot.pause()
+    assert '[bold]x "oops' in _toast_text(app)
+
+    await _save_with(app, "opt-height", "[dim]9x")
+    await pilot.pause()
+    assert "[dim]9x" in _toast_text(app)
+
+
+async def test_notify_with_an_unbalanced_bracket_does_not_kill_the_app() -> None:
+  """Worse than a mangled echo: `Content.from_markup` raises `MarkupError` on
+  an unbalanced tag, out of `Toast.render`, and the app goes down -- while
+  reporting a *validation* problem, i.e. exactly when the user already typed
+  something malformed."""
+  app = _make_app()
+  async with app.run_test(notifications=True) as pilot:
+    await _save_with(app, "opt-height", "[/b]7x")
+    await pilot.pause()
+    assert app.is_running is True
+    assert "[/b]7x" in _toast_text(app)

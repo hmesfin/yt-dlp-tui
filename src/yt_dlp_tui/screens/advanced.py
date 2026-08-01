@@ -70,6 +70,15 @@ class AdvancedScreen(Screen):
       self.notify(
         f"Ignoring height {raw!r} — must be a positive whole number.",
         severity="warning",
+        # markup=False for the same reason every Static on these screens sets
+        # it: `App.notify` defaults to markup on and `Toast.render` runs the
+        # message through `Content.from_markup`. This message interpolates the
+        # user's own rejected input, so "[dim]9x" would be echoed back as "9x"
+        # -- reporting a different value than the one that was dropped, which
+        # is the exact silent loss this notify exists to prevent -- and
+        # "[/b]7x" would raise MarkupError out of `Toast.render` and take the
+        # app down while reporting a validation problem.
+        markup=False,
       )
     return value
 
@@ -85,6 +94,7 @@ class AdvancedScreen(Screen):
       self.notify(
         f"Ignoring extra args {raw!r} — unbalanced quotes.",
         severity="warning",
+        markup=False,  # see _parse_height
       )
       return ()
 

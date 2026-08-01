@@ -63,7 +63,7 @@ import pytest
 from textual.widgets import Input, ListView, Static
 
 from yt_dlp_tui.app import YtDlpTuiApp
-from yt_dlp_tui.presets import BUILTIN_PRESETS
+from yt_dlp_tui.presets import BUILTIN_PRESETS, Preset
 from yt_dlp_tui.probe import ProbeResult, Tooling
 from yt_dlp_tui.screens import main as main_screen_module
 
@@ -341,6 +341,37 @@ async def test_an_unbalanced_bracket_does_not_crash_the_app() -> None:
     preview = app.screen.query_one("#command-preview", Static)
     assert _rendered(preview) == str(preview.content).replace(" ", "")
     assert "[/close]" in str(preview.content)
+
+
+async def test_bracketed_preset_names_survive_the_preset_list() -> None:
+  """Third site of the same markup defect: the preset rows are
+  `ListItem(Static(preset.name))`, and `preset.name` comes straight out of the
+  user's `config.toml`, which the README tells people to write. `[FLAC]` and
+  `[1080p]` are exactly the kind of thing that goes in a preset name."""
+  presets = (Preset(id="flac", name="Lossless [FLAC] rip", args=("-x",)), *BUILTIN_PRESETS)
+  app = YtDlpTuiApp(presets=presets, tooling=OFFLINE_TOOLING)
+  async with app.run_test() as pilot:
+    await pilot.pause()
+    # The `Static` inside the row, not the `ListItem`: a `ListItem` renders
+    # its children through the compositor, so its own `render_line` is blank.
+    row = app.screen.query_one("#preset-list", ListView).children[0].query_one(Static)
+    assert "Lossless [FLAC] rip" in row.render_line(0).text
+
+
+async def test_an_unbalanced_bracket_in_a_preset_name_does_not_crash_the_app() -> None:
+  """`Static.update`/`Static.render` raise `MarkupError` on an unbalanced tag.
+  Here it happens during `MainScreen.on_mount`'s first `refresh_presets()`, so
+  the app dies at startup and the user has no way back in short of editing the
+  config file they cannot see."""
+  presets = (Preset(id="flac", name="Lossless [/b] rip", args=("-x",)), *BUILTIN_PRESETS)
+  app = YtDlpTuiApp(presets=presets, tooling=OFFLINE_TOOLING)
+  async with app.run_test() as pilot:
+    await pilot.pause()
+    assert app.is_running is True
+    # The `Static` inside the row, not the `ListItem`: a `ListItem` renders
+    # its children through the compositor, so its own `render_line` is blank.
+    row = app.screen.query_one("#preset-list", ListView).children[0].query_one(Static)
+    assert "Lossless [/b] rip" in row.render_line(0).text
 
 
 # Preflight tool warnings (Task 10)
