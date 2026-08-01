@@ -6,14 +6,27 @@ Two responsibilities beyond drawing:
   `start_new_session=True`, which puts yt-dlp (and the ffmpeg/aria2c it
   spawns) in their own session. The terminal's Ctrl-C no longer reaches them
   and neither does SIGHUP, so this screen is the only thing that will ever
-  signal them. `on_unmount` therefore *awaits* the kill rather than merely
-  requesting it -- Textual's own worker teardown (`Widget._on_unmount` ->
-  `WorkerManager.cancel_node`) only calls `Task.cancel()` and never waits, so
-  relying on it would let the app's event loop close while the SIGTERM was
-  still in flight, leaving an orphan downloading in the background. Verified
-  against Textual 8.2.8: a handler defined on this class is dispatched ahead
-  of `Widget._on_unmount` (`MessagePump._get_dispatch_methods` walks the MRO
-  subclass-first), so the worker is still ours to await at that point.
+  signal them.
+
+  The runner's cleanup -- SIGTERM, a grace period, then SIGKILL -- runs
+  *inside* the driving task's own cancellation, unwinding through
+  `runner.run`'s `finally`. That makes a second `Task.cancel()` on that task
+  actively destructive: it raises `CancelledError` at whichever `await` the
+  cleanup is parked on, abandoning the escalation and leaving a child that
+  shrugged off the SIGTERM alive forever. So the driver is a **plain
+  `asyncio.Task`, deliberately not a Textual worker**. Textual's
+  `WorkerManager.cancel_all()` fires from `_process_messages`' `finally` --
+  which on the production `run_async` path happens *before* `Unmount` is
+  dispatched (`app.py:2286-2300`), the opposite order from `run_test` -- and
+  it calls `Task.cancel()` on every registered worker unconditionally.
+  Anything registered there is therefore cancellable by Textual at a moment
+  of its choosing, twice if the user already pressed `c`. A plain task is
+  invisible to the manager, so `stop_run()` is the only thing that ever
+  cancels the driver, exactly once, and it always awaits the result.
+
+  `on_unmount` is what does that awaiting, and it is dispatched ahead of
+  `Widget._on_unmount` because `MessagePump._get_dispatch_methods` walks the
+  MRO subclass-first.
 
 * **The runner does not truncate.** A `LogEvent` can carry ~1 MiB of text (an
   over-long line is dropped by `runner._pump`, but the tail of it still
@@ -21,7 +34,7 @@ Two responsibilities beyond drawing:
   capped here.
 """
 
-import contextlib
+import asyncio
 import shlex
 from typing import ClassVar
 
@@ -29,7 +42,7 @@ from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import Footer, ProgressBar, RichLog, Static
-from textual.worker import Worker, WorkerCancelled, WorkerFailed
+from textual.worker import WorkerFailed
 
 from yt_dlp_tui.events import DoneEvent, Event, LogEvent, PostProcessEvent, ProgressEvent
 from yt_dlp_tui.runner import run
@@ -77,7 +90,8 @@ class RunScreen(Screen):
     self.log_lines: list[str] = []
     self.finished = False
     self.cancelled = False
-    self._worker: Worker[None] | None = None
+    self._run_task: asyncio.Task[None] | None = None
+    self._stopping = False
 
   def compose(self) -> ComposeResult:
     with Vertical():
@@ -95,7 +109,23 @@ class RunScreen(Screen):
   def on_mount(self) -> None:
     self.query_one("#title", Static).update(shlex.join(self.argv))
     if self.autostart:
-      self._worker = self.run_worker(self._drive(), group="run", exclusive=True)
+      # Not `self.run_worker(...)`: see the module docstring. The reference is
+      # held so the loop cannot garbage-collect a task nobody is awaiting yet.
+      self._run_task = asyncio.create_task(self._drive(), name="yt-dlp-tui run")
+      self._run_task.add_done_callback(self._on_drive_done)
+
+  def _on_drive_done(self, task: asyncio.Task[None]) -> None:
+    """Surface a driver crash the way `run_worker(exit_on_error=True)` would.
+
+    A plain task swallows its exception into "never retrieved" noise at GC
+    time; `Worker._run` hands it to `App._handle_exception` instead, and a bug
+    in `apply_event` should be just as loud here as it would be there.
+    """
+    if task.cancelled():
+      return
+    error = task.exception()
+    if error is not None:
+      self.app._handle_exception(WorkerFailed(error))
 
   async def _drive(self) -> None:
     stream = run(self.argv)
@@ -115,13 +145,23 @@ class RunScreen(Screen):
     Bounded by the runner's own escalation (SIGTERM, then SIGKILL, every wait
     with a timeout), so this can take up to ~10s in the pathological case
     where something ignores SIGTERM. Milliseconds otherwise.
+
+    Safe to call more than once (`c` then quit does exactly that): the second
+    call waits on the first call's cleanup instead of cancelling into it.
     """
-    worker = self._worker
-    if worker is None:
+    task = self._run_task
+    if task is None:
       return
-    worker.cancel()
-    with contextlib.suppress(WorkerCancelled, WorkerFailed):
-      await worker.wait()
+    if not self._stopping:
+      self._stopping = True
+      task.cancel()
+    # `asyncio.wait` and not `await task` / `gather(task)`. Both of those
+    # propagate: `await task` re-raises the driver's CancelledError here, and
+    # cancelling a coroutine parked on `gather(task)` cancels `task` itself --
+    # which is precisely the second cancel this design exists to avoid, and it
+    # happens for real when `cancel_all()` cancels the `c`-handler worker
+    # while it is waiting here. `asyncio.wait` never touches what it waits on.
+    await asyncio.wait({task})
 
   async def on_unmount(self) -> None:
     await self.stop_run()
@@ -131,7 +171,7 @@ class RunScreen(Screen):
     if not self.is_running:
       # The screen's message loop has stopped, which Textual does *before* it
       # prunes the screen's children -- so between here and `on_unmount`
-      # cancelling the worker there is a window where the widgets below no
+      # stopping the driver there is a window where the widgets below no
       # longer exist and `query_one` would raise `NoMatches` inside the
       # worker, taking the app down. Late events are simply dropped.
       return
@@ -158,6 +198,11 @@ class RunScreen(Screen):
       self.query_one("#stage", Static).update(self._done_message(event))
 
   def _done_message(self, event: DoneEvent) -> str:
+    # `ok` is checked before `cancelled` on purpose. Exit 0 after a cancel
+    # means the child finished the download before the SIGTERM reached it --
+    # yt-dlp exits non-zero when it is actually interrupted -- so the file is
+    # on disk and "done" is the true statement. Reporting "cancelled" there
+    # would send the user looking for a download they already have.
     if event.ok:
       return "done"
     if self.cancelled:
@@ -189,5 +234,13 @@ class RunScreen(Screen):
     # Popping unmounts this screen, and `on_unmount` stops the run: there is
     # nowhere left to render it, so leaving it going would be an invisible
     # download the user cannot see, cancel, or find.
+    #
+    # Deliberately not awaited. `pop_screen` returns immediately and the kill
+    # finishes in the background, so MainScreen is usable again while a
+    # stubborn child is still being shot -- the user could start a second
+    # download in that window. That is safe (each RunScreen owns its own
+    # generator and its own process group, so the runner's non-re-entrancy
+    # constraint still holds) and the alternative is freezing the UI for up to
+    # ~10s on the way back to a screen the user asked for.
     self.cancelled = True
     self.app.pop_screen()

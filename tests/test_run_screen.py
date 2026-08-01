@@ -1,37 +1,28 @@
-"""Coverage for the run screen: event rendering, the log cap, cancellation, and
-the guarantee that no download outlives the TUI.
+"""Coverage for the run screen's rendering: how each event type reaches the
+widgets, the log caps, and the wiring from the main screen.
 
-Two things here are load-bearing:
+Everything here drives `apply_event` (or a keypress) directly and asserts on
+widgets. The companion file `test_run_screen_teardown.py` owns the other half
+-- whether the child *process* is actually dead -- and is where the real
+subprocesses live.
 
-1. **Nothing may spawn a real `yt-dlp` or touch the network.** This is the
-   first screen that runs subprocesses on purpose, so the guarantee is
-   structural rather than per-test discipline (an earlier round of
-   `test_main_screen.py` leaked two real `yt-dlp -J` invocations out of one
-   un-guarded keystroke). The autouse `_guarded_run` fixture replaces the
-   `run` name `screens/run.py` resolves at call time; it only delegates to the
-   real runner when `argv[0]` is this interpreter, and records everything
-   else. `_stub_probe` does the same for the `MainScreen` underneath.
-
-2. **Every "the run was cancelled" assertion checks the process, not the UI
-   text.** `tests/test_runner.py` established the technique: the child prints
-   its pid and the test polls `os.kill(pid, 0)` until `ProcessLookupError`. A
-   test that only asserts `#stage` says "cancelled" passes just as happily on
-   code that leaves an orphaned yt-dlp downloading in the background -- and
-   the runner spawns with `start_new_session=True`, so nothing else (not the
-   terminal's Ctrl-C, not SIGHUP) will ever signal that child.
+**Nothing here may spawn a real `yt-dlp` or touch the network.** This is the
+first screen that runs subprocesses on purpose, so the guarantee is structural
+rather than per-test discipline (an earlier round of `test_main_screen.py`
+leaked two real `yt-dlp -J` invocations out of one un-guarded keystroke). The
+autouse `_guarded_run` fixture replaces the `run` name `screens/run.py`
+resolves at call time; it only delegates to the real runner when `argv[0]` is
+this interpreter, and records everything else -- so pushing a `RunScreen` with
+a genuine `yt-dlp` argv records the argv and spawns nothing. `_stub_probe`
+does the same for the `MainScreen` mounted underneath.
 
 Textual 8.2.8, same as the other screen tests: `app.query_one` never searches
 a pushed screen (use `app.screen.query_one`), and `Static` exposes what
 `.update()` stored as `.content`, not `.renderable`.
 """
 
-import asyncio
-import contextlib
-import os
-import signal
 import sys
-import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 
 import pytest
 from textual.pilot import Pilot
@@ -49,27 +40,9 @@ from yt_dlp_tui.screens.run import MAX_LOG_LINE_CHARS, RunScreen
 
 OFFLINE_TOOLING = Tooling(ytdlp=None, ffmpeg=None)
 
-# Only ever rendered into `#title`; every test that uses it passes
-# `autostart=False`, so nothing is spawned. The guard fixture below would
-# refuse to spawn it anyway.
+# Only ever rendered into `#title`: every RunScreen here is `autostart=False`,
+# so nothing is spawned, and the guard fixture would refuse to spawn it anyway.
 ARGV = ["true"]
-
-# A child that announces its own pid and then refuses to end on its own, so a
-# cancel that fails to kill it is observable rather than a race.
-ANNOUNCE_AND_SLEEP = (
-  "import os, time\nprint(f'up {os.getpid()}', flush=True)\nwhile True: time.sleep(0.05)\n"
-)
-
-# The same, but deaf to SIGTERM -- the runner then has to sit out its whole
-# SIGTERM grace period and escalate to SIGKILL, which takes many event-loop
-# turns instead of one. yt-dlp installs its own SIGTERM handling, so this is
-# the realistic shape of a stubborn child rather than a contrived one.
-SIGTERM_DEAF = (
-  "import os, signal, time\n"
-  "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-  "print(f'up {os.getpid()}', flush=True)\n"
-  "while True: time.sleep(0.05)\n"
-)
 
 
 async def _no_events() -> AsyncIterator[Event]:
@@ -110,18 +83,8 @@ def _make_app() -> YtDlpTuiApp:
   return YtDlpTuiApp(presets=BUILTIN_PRESETS, tooling=OFFLINE_TOOLING)
 
 
-def _child(body: str) -> list[str]:
-  return [sys.executable, "-c", body]
-
-
-async def _screen(
-  app: YtDlpTuiApp,
-  pilot: Pilot,
-  argv: list[str] | None = None,
-  *,
-  autostart: bool = False,
-) -> RunScreen:
-  await app.push_screen(RunScreen(ARGV if argv is None else argv, autostart=autostart))
+async def _screen(app: YtDlpTuiApp, pilot: Pilot) -> RunScreen:
+  await app.push_screen(RunScreen(ARGV, autostart=False))
   await pilot.pause()
   screen = app.screen
   assert isinstance(screen, RunScreen)
@@ -130,50 +93,6 @@ async def _screen(
 
 def _stage(screen: RunScreen) -> str:
   return str(screen.query_one("#stage", Static).content)
-
-
-async def _settle(pilot: Pilot, predicate: Callable[[], bool], timeout: float = 15.0) -> None:
-  """Pump the app until `predicate` holds, or fail."""
-  deadline = time.monotonic() + timeout
-  while time.monotonic() < deadline:
-    if predicate():
-      return
-    await pilot.pause()
-    await asyncio.sleep(0.02)
-  raise AssertionError("timed out waiting for the app to settle")
-
-
-def _alive(pid: int) -> bool:
-  try:
-    os.kill(pid, 0)
-  except ProcessLookupError:
-    return False
-  return True
-
-
-async def _child_pid(screen: RunScreen, pilot: Pilot) -> int:
-  await _settle(pilot, lambda: any(line.startswith("up ") for line in screen.log_lines))
-  line = next(line for line in screen.log_lines if line.startswith("up "))
-  pid = int(line.split()[1])
-  assert _alive(pid), "the child was already gone before the test did anything"
-  return pid
-
-
-def _assert_gone(pid: int, timeout: float = 5.0) -> None:
-  deadline = time.monotonic() + timeout
-  while time.monotonic() < deadline:
-    if not _alive(pid):
-      return
-    time.sleep(0.02)
-  raise AssertionError(f"child pid {pid} is still alive")
-
-
-def _reap(pid: int) -> None:
-  """Belt and braces: never let a failing test leak a sleeping child."""
-  with contextlib.suppress(ProcessLookupError):
-    os.killpg(pid, signal.SIGKILL)
-  with contextlib.suppress(ProcessLookupError):
-    os.kill(pid, signal.SIGKILL)
 
 
 # Event rendering (the brief's six, driven through `apply_event` directly)
@@ -298,20 +217,49 @@ async def test_a_done_event_after_a_user_cancel_reads_as_cancelled() -> None:
 # Log caps -- LogEvent.text can be ~1 MiB (runner does not truncate)
 
 
-async def test_cancelling_a_finished_run_does_not_relabel_it() -> None:
-  """`c` still reaches its binding once the run is over. Overwriting "done"
-  with "cancelled" would tell the user their finished download was aborted."""
+async def test_cancelling_a_finished_run_does_not_relabel_it(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """Overwriting "done" with "cancelled" would tell the user their finished
+  download was aborted.
+
+  The spy is the point: asserting only that `#stage` still reads "done" would
+  pass just as well if `c` were unbound entirely, which is a different (and
+  untrue) claim. This pins that the binding really fires and that the *body*
+  is what declines to do anything."""
   app = _make_app()
   async with app.run_test() as pilot:
     screen = await _screen(app, pilot)
     screen.apply_event(DoneEvent(returncode=0))
     await pilot.pause()
 
+    fired: list[bool] = []
+    real_action_cancel = screen.action_cancel
+    monkeypatch.setattr(
+      screen, "action_cancel", lambda: (fired.append(True), real_action_cancel())[1]
+    )
+
     await pilot.press("c")
     await pilot.pause()
 
+    assert fired == [True], "the `c` binding never reached action_cancel"
     assert _stage(screen) == "done"
     assert screen.cancelled is False
+
+
+async def test_a_successful_exit_after_a_cancel_still_reads_as_done() -> None:
+  """The other side of the sibling test above. yt-dlp exits non-zero when it
+  is actually interrupted, so exit 0 after a cancel means the download beat
+  the SIGTERM and the file is on disk. "cancelled" would send the user looking
+  for something they already have."""
+  app = _make_app()
+  async with app.run_test() as pilot:
+    screen = await _screen(app, pilot)
+    screen.action_cancel()
+    await pilot.pause()
+    screen.apply_event(DoneEvent(returncode=0))
+    await pilot.pause()
+    assert _stage(screen) == "done"
 
 
 async def test_an_over_long_log_line_is_capped() -> None:
@@ -342,99 +290,6 @@ async def test_the_log_line_list_is_bounded(monkeypatch: pytest.MonkeyPatch) -> 
       screen.apply_event(LogEvent(f"line {index}"))
     await pilot.pause()
     assert screen.log_lines == [f"line {index}" for index in range(7, 12)]
-
-
-# A real run: events reach the widgets, and cancellation kills the process
-
-
-async def test_a_real_run_streams_events_into_the_widgets() -> None:
-  """Everything above drives `apply_event` by hand, so all of it would pass
-  even if the worker never consumed the runner. This spawns a real (hermetic)
-  child through the real runner and asserts the widgets moved."""
-  body = (
-    'print(\'PROG:{"b":5,"t":10,"s":1024.0,"e":2,"i":1,"n":2,"title":"T"}\', flush=True)\n'
-    "print('[download] Destination: a.mp4', flush=True)\n"
-  )
-  app = _make_app()
-  async with app.run_test() as pilot:
-    screen = await _screen(app, pilot, _child(body), autostart=True)
-    await _settle(pilot, lambda: screen.finished)
-    assert screen.query_one("#progress", ProgressBar).progress == 50.0
-    assert any("Destination" in line for line in screen.log_lines)
-    assert "done" in _stage(screen).lower()
-
-
-async def test_c_cancels_the_run_and_kills_the_child() -> None:
-  """The keymap ruling: no `Input` on this screen, so a bare `c` reaches its
-  binding. Proven with a real keypress and a dead pid, not by `#stage`."""
-  app = _make_app()
-  pid: int | None = None
-  try:
-    async with app.run_test() as pilot:
-      screen = await _screen(app, pilot, _child(ANNOUNCE_AND_SLEEP), autostart=True)
-      pid = await _child_pid(screen, pilot)
-
-      await pilot.press("c")
-      await _settle(pilot, lambda: not _alive(pid))
-
-      _assert_gone(pid)
-      assert "cancel" in _stage(screen).lower()
-      assert app.is_running is True  # cancelling a run does not quit the app
-  finally:
-    if pid is not None:
-      _reap(pid)
-
-
-async def test_escape_goes_back_to_the_main_screen_and_stops_the_run() -> None:
-  app = _make_app()
-  pid: int | None = None
-  try:
-    async with app.run_test() as pilot:
-      screen = await _screen(app, pilot, _child(ANNOUNCE_AND_SLEEP), autostart=True)
-      pid = await _child_pid(screen, pilot)
-
-      await pilot.press("escape")
-      await _settle(pilot, lambda: not _alive(pid))
-
-      _assert_gone(pid)
-      assert isinstance(app.screen, MainScreen)
-  finally:
-    if pid is not None:
-      _reap(pid)
-
-
-async def test_exiting_the_app_leaves_no_orphaned_download(monkeypatch: pytest.MonkeyPatch) -> None:
-  """The responsibility the runner's `start_new_session=True` created and
-  handed to this screen: the child is in its own session, so the terminal's
-  Ctrl-C never reaches it and SIGHUP never reaches it. If the TUI exits
-  without closing the run, the download survives as an orphan holding the
-  network and writing to the output file.
-
-  Two details make this bite where the obvious version does not. Textual's own
-  teardown (`Widget._on_unmount` -> `WorkerManager.cancel_node`) does call
-  `Task.cancel()` on the driving worker, and a cancelled run kills its process
-  group on the way out -- but only if the loop keeps handing it turns. With an
-  ordinary child SIGTERM lands in ~1ms and the incidental turns during
-  shutdown suffice, so deleting the screen's teardown changes nothing. So the
-  child here **ignores SIGTERM** (yt-dlp installs its own handling; a wedged
-  ffmpeg behaves the same), forcing the runner through its grace period and on
-  to SIGKILL -- many loop turns, not one. And the assertion below uses only
-  `time.sleep`, never `await`, so the loop gets **no further turns**: a kill
-  that was requested but not awaited shows up as a live pid.
-  """
-  monkeypatch.setattr(runner, "_TERM_TIMEOUT", 0.5)
-  app = _make_app()
-  pid: int | None = None
-  try:
-    async with app.run_test() as pilot:
-      screen = await _screen(app, pilot, _child(SIGTERM_DEAF), autostart=True)
-      pid = await _child_pid(screen, pilot)
-    # The app has fully shut down here: the child must already be gone, not
-    # merely scheduled for cancellation.
-    _assert_gone(pid, timeout=0.5)
-  finally:
-    if pid is not None:
-      _reap(pid)
 
 
 async def test_events_arriving_after_the_screen_is_popped_do_not_crash() -> None:
@@ -481,18 +336,27 @@ async def test_download_pushes_a_run_screen_with_the_current_command(
     assert _guarded_run == [expected]
 
 
-async def test_download_with_a_blank_url_does_not_push_a_run_screen(
+async def test_download_with_a_blank_url_says_so_instead_of_doing_nothing(
   _guarded_run: list[list[str]],
+  monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+  """Pressing enter on an empty box and getting no reaction at all reads as a
+  broken key rather than a missing URL, so the no-op has to be audible."""
   app = _make_app()
   async with app.run_test() as pilot:
     await pilot.pause()
     main_screen = app.screen
+    notifications: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(
+      main_screen, "notify", lambda *args, **kwargs: notifications.append((args, kwargs))
+    )
     app.url = "   "
     await pilot.pause()
 
     await pilot.press("enter")
     await pilot.pause()
+
+    assert notifications, "expected a notify() call telling the user to enter a URL"
 
     assert app.screen is main_screen
     assert _guarded_run == []

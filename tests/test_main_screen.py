@@ -86,6 +86,12 @@ def _make_app() -> YtDlpTuiApp:
   return YtDlpTuiApp(presets=BUILTIN_PRESETS, tooling=OFFLINE_TOOLING)
 
 
+def _rendered(widget: Static) -> str:
+  """Every rendered line of a widget, spaces removed, so the result does not
+  depend on where the text happened to wrap."""
+  return "".join(widget.render_line(y).text for y in range(widget.size.height)).replace(" ", "")
+
+
 async def test_app_starts_and_shows_presets() -> None:
   app = _make_app()
   async with app.run_test() as pilot:
@@ -286,3 +292,52 @@ async def test_typing_a_url_updates_state_and_replaces_stale_meta(
     await pilot.pause()
 
     assert "Stubbed Title" in str(meta.content)
+
+
+async def test_bracketed_text_survives_the_meta_and_preview_statics() -> None:
+  """Textual 8 parses content markup in `Static.update`, and both of these
+  Statics carry text nobody controls: `#meta` shows a probed yt-dlp title and
+  `#command-preview` shows `shlex.join(cmd)`, which carries the user's URL and
+  `-o` template. With markup on, "[MV] Song" renders as " Song" -- silent
+  content loss the user cannot detect, and bracketed titles ("[MV]",
+  "[Official Video]", "[4K]") are near-universal on YouTube.
+
+  `.content` reads back the raw string whether or not markup is enabled, so
+  asserting on it would not bite; the assertion has to be on the *rendered*
+  line.
+  """
+  app = _make_app()
+  async with app.run_test() as pilot:
+    await pilot.pause()
+    meta = app.screen.query_one("#meta", Static)
+    meta.update("[MV] Song [Official Video] · Fake")
+    await pilot.pause()
+    assert "[MV] Song [Official Video]" in meta.render_line(0).text
+
+    app.url = "https://example.com/watch?v=[abc]"
+    await pilot.pause()
+    preview = app.screen.query_one("#command-preview", Static)
+    # The preview wraps over many lines, so compare the whole rendered block
+    # against what was stored. Wrapping only inserts line breaks -- it never
+    # deletes characters -- so ignoring spaces makes this wrap-independent,
+    # while markup parsing *would* delete the bracketed runs.
+    assert _rendered(preview) == str(preview.content).replace(" ", "")
+    assert "[abc]" in str(preview.content)
+
+
+async def test_an_unbalanced_bracket_does_not_crash_the_app() -> None:
+  """Worse than mangled text: with markup on, `Static.update("a [/b] c")`
+  raises `MarkupError` from inside a reactive watcher, and with Textual's
+  default `exit_on_error` that takes the whole app down mid-session. A URL is
+  the easiest place for a user to paste one."""
+  app = _make_app()
+  async with app.run_test() as pilot:
+    await pilot.pause()
+    app.screen.query_one("#meta", Static).update("a [/b] c")
+    app.url = "https://example.com/[/close]"
+    await pilot.pause()
+
+    assert app.is_running is True
+    preview = app.screen.query_one("#command-preview", Static)
+    assert _rendered(preview) == str(preview.content).replace(" ", "")
+    assert "[/close]" in str(preview.content)

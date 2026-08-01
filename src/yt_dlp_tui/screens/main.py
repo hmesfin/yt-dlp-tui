@@ -44,9 +44,18 @@ class MainScreen(Screen):
     yield Header()
     with Vertical():
       yield Input(placeholder="Paste a URL…", id="url-input")
-      yield Static("", id="meta")
+      # markup=False on both: Textual 8 parses content markup in
+      # `Static.update`, and both of these carry text we do not control.
+      # `#meta` shows a probed yt-dlp title, where "[MV] Song" renders as
+      # " Song" and "10 [things] you" as "10  you" -- silent content loss the
+      # user cannot detect, and bracketed titles are near-universal on
+      # YouTube. `#command-preview` shows `shlex.join(cmd)`, carrying the
+      # user's URL and `-o` template. An unbalanced tag ("a [/b] c") is worse
+      # than mangled: `Static.update` raises MarkupError, here out of a
+      # reactive watcher, which takes the app down.
+      yield Static("", id="meta", markup=False)
       yield ListView(id="preset-list")
-      yield Static("", id="command-preview")
+      yield Static("", id="command-preview", markup=False)
     yield Footer()
 
   async def on_mount(self) -> None:
@@ -131,3 +140,7 @@ class MainScreen(Screen):
   def action_download(self) -> None:
     if self.app.url.strip():
       self.app.push_screen(RunScreen(self.app.current_command()))
+    else:
+      # Pressing enter on an empty box and getting nothing at all reads as a
+      # broken key, not as a missing URL.
+      self.notify("Enter a URL first.")
