@@ -1,4 +1,3 @@
-# tests/test_config.py
 from pathlib import Path
 
 from yt_dlp_tui import config

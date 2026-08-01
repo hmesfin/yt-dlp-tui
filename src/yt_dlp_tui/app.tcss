@@ -1,4 +1,3 @@
-/* src/yt_dlp_tui/app.tcss */
 Screen { layout: vertical; }
 #tool-warning { margin: 0 2; color: $warning; text-style: bold; height: auto; }
 #url-input { margin: 1 2 0 2; }

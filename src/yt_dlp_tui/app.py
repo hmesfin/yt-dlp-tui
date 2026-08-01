@@ -48,6 +48,12 @@ class YtDlpTuiApp(App):
     read the user's real config file and probe PATH for `yt-dlp`/`ffmpeg`,
     neither of which a test suite should depend on."""
     super().__init__()
+    # Problems found before the first frame is drawn, shown by `MainScreen`'s
+    # startup banner alongside the missing-binary warnings. A list rather than
+    # a notify: `on_mount` runs before `push_screen(MainScreen())`, so a toast
+    # raised there would be mounted on the default screen and immediately
+    # covered by the one being pushed over it.
+    self.startup_warnings: list[str] = []
     self.presets = presets if presets is not None else load_presets()
     self.tooling = tooling if tooling is not None else detect_tooling()
     self.selected_preset = self.presets[0]
@@ -96,7 +102,36 @@ class YtDlpTuiApp(App):
       await screen.refresh_presets()
       screen.refresh_preview()
 
+  def _ensure_data_dir(self) -> None:
+    """Create the directory the playlist download archive lives in.
+
+    Nothing else in the app ever creates it. yt-dlp's
+    `record_download_archive` opens the archive with `locked_file(fn, "a")`,
+    which does not create parent directories, and its call site has no guard,
+    so on a fresh machine both playlist presets die with `FileNotFoundError`
+    -- and only *after* the first item of the playlist has already
+    downloaded, because the read path (`in_download_archive`) tolerates a
+    missing file while the write path does not. This app never passes
+    `--ignore-errors`, so that exception is fatal to the run.
+
+    Deliberately not in `config.py`, whose stated contract is pure path
+    computation with no I/O. Deliberately at startup rather than inside
+    `action_download`: it is the same directory for every download, creating
+    it is idempotent, and doing it once means no download path can forget.
+    """
+    directory = config.data_dir()
+    try:
+      directory.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+      # A read-only home or a plain file in the way. The user may never run a
+      # playlist preset, so this cannot be fatal -- but it must not be silent
+      # either, since the failure it predicts happens mid-download.
+      self.startup_warnings.append(
+        f"Could not create {directory} — playlist downloads cannot write their archive ({error})."
+      )
+
   def on_mount(self) -> None:
+    self._ensure_data_dir()
     self.push_screen(MainScreen())
 
 

@@ -58,10 +58,12 @@ config file or shells out to detect `yt-dlp`/`ffmpeg`.
 """
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from textual.widgets import Input, ListView, Static
 
+from yt_dlp_tui import config
 from yt_dlp_tui.app import YtDlpTuiApp
 from yt_dlp_tui.presets import BUILTIN_PRESETS, Preset
 from yt_dlp_tui.probe import ProbeResult, Tooling
@@ -422,3 +424,47 @@ async def test_no_preflight_warning_when_tooling_is_complete() -> None:
     await pilot.pause()
     warning = app.screen.query_one("#tool-warning", Static)
     assert warning.display is False
+
+
+# The playlist archive directory (final whole-branch review, finding C3)
+
+
+async def test_the_archive_directory_exists_before_a_download_can_start(
+  tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  """Both playlist presets pass `--download-archive` and nothing in `src/` ever
+  created its parent directory. yt-dlp's `record_download_archive` opens the
+  file with `locked_file(fn, "a")`, which does not create parents, and its call
+  site has no guard -- so on a fresh machine a playlist download dies with
+  FileNotFoundError *after* the first item is already on disk. The read path
+  tolerates a missing file, which is why it survives until then.
+
+  Asserted through a real app start rather than by calling a helper, because
+  "something creates it before yt-dlp is ever spawned" is the actual claim.
+  """
+  monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "share"))
+  archive = config.archive_path()
+  assert not archive.parent.exists()
+
+  app = _make_app()
+  async with app.run_test() as pilot:
+    await pilot.pause()
+    assert archive.parent.is_dir()
+
+
+async def test_an_uncreatable_archive_directory_warns_instead_of_crashing(
+  tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  """`mkdir` is I/O and can fail (read-only home, a plain file in the way).
+  Failing to create a directory the user may never need must not take the app
+  down before it has drawn a single frame -- it goes in the same startup
+  banner the missing-binary warnings use."""
+  blocker = tmp_path / "share"
+  blocker.write_text("this is a file, not a directory")
+  monkeypatch.setenv("XDG_DATA_HOME", str(blocker))
+
+  app = _make_app()
+  async with app.run_test() as pilot:
+    await pilot.pause()
+    assert app.is_running is True
+    assert "archive" in str(app.screen.query_one("#tool-warning", Static).content)

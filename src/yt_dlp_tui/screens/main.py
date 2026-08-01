@@ -157,7 +157,7 @@ class MainScreen(Screen):
     yield Static(LEGEND_INPUT_FOCUSED, id="key-legend", markup=False)
 
   async def on_mount(self) -> None:
-    warnings = preflight_warnings(self.app.tooling, self.app.presets)
+    warnings = [*self.app.startup_warnings, *preflight_warnings(self.app.tooling, self.app.presets)]
     banner = self.query_one("#tool-warning", Static)
     # `height: auto` does not collapse an empty Static to zero rows -- with no
     # warnings this still reserved a blank line above #url-input. `display`
