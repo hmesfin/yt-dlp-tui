@@ -102,8 +102,8 @@ advanced drawer. The playlist archive lives at
 ## Development
 
 ```bash
-uv run pytest              # 153 tests, offline
-uv run pytest -m network   # +1 test, a real download against a live URL
+uv run pytest              # offline
+uv run pytest -m network   # one real download against a live URL
 uv run ruff check src tests
 ```
 

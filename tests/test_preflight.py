@@ -1,6 +1,6 @@
 """Pure preflight checks: what's missing on PATH before the user hits download."""
 
-from yt_dlp_tui.presets import BUILTIN_PRESETS
+from yt_dlp_tui.presets import BUILTIN_PRESETS, Preset
 from yt_dlp_tui.probe import Tooling, preflight_warnings
 
 
@@ -20,8 +20,6 @@ def test_no_warnings_when_all_present() -> None:
 
 
 def test_no_ffmpeg_warning_when_no_preset_needs_it() -> None:
-  from yt_dlp_tui.presets import Preset
-
   presets = (Preset(id="x", name="x", args=("-f", "b")),)
   warnings = preflight_warnings(Tooling(ytdlp="/usr/bin/yt-dlp", ffmpeg=None), presets)
   assert warnings == []

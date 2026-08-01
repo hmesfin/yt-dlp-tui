@@ -379,9 +379,15 @@ async def test_preflight_warning_shown_at_mount_and_survives_a_probe() -> None:
 
 
 async def test_no_preflight_warning_when_tooling_is_complete() -> None:
+  """`str(content) == ""` alone would still pass if the `if warnings:` guard
+  in `on_mount` were deleted outright (`" ".join([])` is also `""`), so it
+  wouldn't actually pin the guard. `display is False` does: it only holds if
+  something explicitly hides the widget when there is nothing to say, which
+  also closes the layout bug where an empty `height: auto` Static still
+  reserved a blank row above `#url-input`."""
   tooling = Tooling(ytdlp="/usr/bin/yt-dlp", ffmpeg="/usr/bin/ffmpeg")
   app = _make_app(tooling)
   async with app.run_test() as pilot:
     await pilot.pause()
     warning = app.screen.query_one("#tool-warning", Static)
-    assert str(warning.content) == ""
+    assert warning.display is False

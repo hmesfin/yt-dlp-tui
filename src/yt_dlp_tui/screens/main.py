@@ -68,8 +68,14 @@ class MainScreen(Screen):
 
   async def on_mount(self) -> None:
     warnings = preflight_warnings(self.app.tooling, self.app.presets)
+    banner = self.query_one("#tool-warning", Static)
+    # `height: auto` does not collapse an empty Static to zero rows -- with no
+    # warnings this still reserved a blank line above #url-input. `display`
+    # is the actual on/off switch; only flip it on when there's something to
+    # show.
+    banner.display = bool(warnings)
     if warnings:
-      self.query_one("#tool-warning", Static).update(" ".join(warnings))
+      banner.update(" ".join(warnings))
     await self.refresh_presets()
     self.refresh_preview()
 

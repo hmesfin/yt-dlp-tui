@@ -10,6 +10,8 @@ import json
 import shutil
 from dataclasses import dataclass
 
+from yt_dlp_tui.presets import Preset
+
 # Grace period after SIGTERM before escalating to SIGKILL on a probe that ran
 # past its timeout.
 _TERM_GRACE = 3.0
@@ -154,7 +156,7 @@ def detect_tooling(ytdlp: str = "yt-dlp") -> Tooling:
   return Tooling(ytdlp=shutil.which(ytdlp), ffmpeg=shutil.which("ffmpeg"))
 
 
-def preflight_warnings(tooling: Tooling, presets: tuple) -> list[str]:
+def preflight_warnings(tooling: Tooling, presets: tuple[Preset, ...]) -> list[str]:
   """Human-readable startup problems. Empty list means the environment is fine."""
   warnings: list[str] = []
   if tooling.ytdlp is None:
