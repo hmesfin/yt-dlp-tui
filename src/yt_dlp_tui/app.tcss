@@ -1,0 +1,27 @@
+Screen { layout: vertical; }
+
+/* main screen
+ *
+ * `height: auto` and not `height: 1` on the three text widgets below. Every
+ * one of them carries text that outgrows a narrow terminal: at 46 columns the
+ * elision note read "+4 machine-readable flags hidden · v to", cut mid-phrase,
+ * and at 30 the key legend lost "^q quit" -- the one key that works whatever
+ * has focus. A truncated legend advertises fewer keys than exist; a truncated
+ * elision note leaves a deliberately shortened command with nothing on screen
+ * saying anything was hidden, which is the exact failure the note exists to
+ * prevent. #meta holds a yt-dlp title, which routinely runs past any width and
+ * was cut with no ellipsis to say so.
+ */
+#tool-warning { margin: 0 2; color: $warning; text-style: bold; height: auto; }
+#url-input { margin: 1 2 0 2; }
+#meta { margin: 0 2; color: $text-muted; height: auto; }
+#preset-list { margin: 1 2; height: auto; max-height: 10; border: round $panel; }
+#command-preview { margin: 0 2 0 2; color: $text-muted; height: auto; }
+#command-preview-note { margin: 0 2 1 2; color: $text-muted; height: auto; }
+#key-legend { margin: 0 2; color: $text-muted; height: auto; dock: bottom; }
+
+/* run screen */
+#title { margin: 1 2 0 2; text-style: bold; }
+#counter, #stage { margin: 0 2; color: $text-muted; height: 1; }
+#progress { margin: 1 2; }
+#log { margin: 1 2; height: 1fr; border: round $panel; }

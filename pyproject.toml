@@ -1,0 +1,28 @@
+[project]
+name = "yt-dlp-tui"
+version = "0.1.0"
+description = "Preset-first terminal UI for yt-dlp"
+requires-python = ">=3.12"
+dependencies = [
+  "textual>=8.2.8",
+  "yt-dlp>=2025.1.1",
+]
+
+[project.scripts]
+yt-dlp-tui = "yt_dlp_tui.__main__:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+indent-width = 2
+line-length = 100
+
+[tool.pytest.ini_options]
+markers = ["network: hits the real network; deselected by default"]
+addopts = "-m 'not network'"
+asyncio_mode = "auto"
