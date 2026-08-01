@@ -51,16 +51,22 @@ uv run yt-dlp-tui
 ## Keys
 
 The URL box has focus at launch, so it gets every letter you type. Press
-`escape` to leave it before using the single-letter keys.
+`escape` to leave it — focus moves to the preset list, and the single-letter
+keys go live.
 
 | key | does |
 |---|---|
-| `enter` | start the download (from the URL box) |
-| `escape` | leave the URL box |
+| `enter` | start the download (from either the URL box or the preset list) |
+| `escape` | leave the URL box for the preset list |
+| `↑` `↓` | change preset (after `escape`) |
 | `a` | advanced options (after `escape`) |
 | `q` | quit (after `escape`) |
 | `v` | toggle the full, unelided command (after `escape`) |
 | `ctrl+q` | quit, from anywhere |
+
+`tab` moves between the URL box and the preset list either way, if you'd
+rather not use `escape`. Clicking a preset selects it; it does not start the
+download.
 
 The bar at the bottom of the main screen always reflects which of these are
 live: it reads `⏎ download · esc for keys · ^q quit` while the URL box has

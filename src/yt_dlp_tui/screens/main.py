@@ -16,6 +16,7 @@ import shlex
 from typing import ClassVar
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical
 from textual.events import DescendantBlur, DescendantFocus
 from textual.screen import Screen
@@ -38,7 +39,36 @@ from yt_dlp_tui.screens.run import RunScreen
 # picks between them off the real focus state, not off mount alone), so the
 # legend can never be truer or falser than the keys underneath it.
 LEGEND_INPUT_FOCUSED = "⏎ download · esc for keys · ^q quit"
+# Unchanged from Task 11 on purpose: with `escape` moving focus to the preset
+# list (and `PresetList` re-pointing `enter`), all five of these keys are live
+# in the state this string describes, so the honest legend and the pinned one
+# are now the same text. Nothing here is reworded for its own sake.
 LEGEND_INPUT_BLURRED = "a advanced · q quit · v full command · ↑↓ preset · ⏎ download"
+
+
+class PresetList(ListView):
+  """The preset rows. Exists only to re-point `enter` at the download action.
+
+  `ListView` binds `enter` to its own `action_select_cursor`, and
+  `Screen._check_bindings` stops at the first namespace in the chain with a
+  matching key -- so a Screen-level `enter` binding would never be reached
+  while this widget has focus, which (after the `escape` fix in
+  `action_blur_url`) is the state the blurred legend describes. Overriding the
+  binding here is what makes that legend's `⏎ download` true.
+
+  Handling `ListView.Selected` on the screen would have been the shorter fix
+  and is wrong: `_on_list_item__child_clicked` posts `Selected` for a *mouse
+  click* too, so it would leave a mouse user unable to change preset without
+  starting a download. A binding only fires for the key.
+
+  `screen.download` rather than a bare `download`: Textual resolves the
+  `screen` namespace against `App.screen` (`App._action_targets`), so the
+  action runs on `MainScreen`, which is where it lives.
+  """
+
+  BINDINGS: ClassVar[list[Binding]] = [
+    Binding("enter", "screen.download", "download", show=False),
+  ]
 
 
 class MainScreen(Screen):
@@ -71,6 +101,13 @@ class MainScreen(Screen):
   # flag to thread through `App.watch_*` or any other call site.
   _show_full_command: bool = False
 
+  # The preset ids, in the order the rows were last built. `refresh_presets`
+  # compares against it to tell a *reorder* (probe revealed a playlist) from a
+  # rebuild that produced the same rows again -- which is what every one of the
+  # per-keystroke probe results does. See `refresh_presets` for why that
+  # distinction is the whole fix.
+  _preset_order: tuple[str, ...] = ()
+
   def compose(self) -> ComposeResult:
     yield Header()
     with Vertical():
@@ -93,7 +130,7 @@ class MainScreen(Screen):
       # than mangled: `Static.update` raises MarkupError, here out of a
       # reactive watcher, which takes the app down.
       yield Static("", id="meta", markup=False)
-      yield ListView(id="preset-list")
+      yield PresetList(id="preset-list")
       yield Static("", id="command-preview", markup=False)
       # A separate Static from #command-preview, not a second line appended
       # to the same one: two existing tests
@@ -143,6 +180,15 @@ class MainScreen(Screen):
     # result arriving) mount before the previous `clear()`'s removals have
     # landed, raising `DuplicateIds` on the reused `preset-<id>` widget ids.
     listing = self.query_one("#preset-list", ListView)
+    # Read the highlight off the widget rather than `app.selected_preset`:
+    # this is what the user can actually see selected right now, and it cannot
+    # lag behind a `Highlighted` message that has not been dispatched yet.
+    highlighted = listing.highlighted_child
+    previous_id = (
+      highlighted.id.removeprefix("preset-")
+      if highlighted is not None and highlighted.id is not None
+      else None
+    )
     await listing.clear()
     # markup=False on the row's Static for the same reason as #meta and
     # #command-preview above: `preset.name` comes out of the user's
@@ -158,11 +204,24 @@ class MainScreen(Screen):
     # `ListView` composed empty and populated here: its own `_on_mount` only
     # sets `index` when `self.children` is non-empty *at mount time*, which
     # it never is for us, so nothing ever highlights a row on its own. Set it
-    # explicitly on every rebuild -- including reorders -- so there is always
-    # a visible selection and so a reorder actually steers `selected_preset`
-    # (via the `Highlighted` message this posts, handled below). `validate_index`
-    # clamps this to `None` on its own if `items` is empty.
-    listing.index = 0
+    # explicitly on every rebuild so there is always a visible selection and
+    # so a reorder actually steers `selected_preset` (via the `Highlighted`
+    # message this posts, handled below). `validate_index` clamps this to
+    # `None` on its own if `items` is empty.
+    #
+    # Not unconditionally `0`, though. `watch_probe_result` rebuilds on every
+    # probe result, and probes fire per keystroke with no debounce, so an
+    # unconditional reset silently dragged the highlight back to row 0 under a
+    # user who was mid-selection -- picking a preset takes about as long as a
+    # network probe, so that is a live race, not a theoretical one. Row 0 is
+    # forced only when the ordering actually changed, which is exactly the
+    # case the spec's playlist behaviour needs (playlist presets sort to the
+    # top and one is preselected); every same-order rebuild keeps whatever the
+    # user had highlighted.
+    order = tuple(preset.id for preset in self.app.ordered_presets)
+    reordered = order != self._preset_order
+    self._preset_order = order
+    listing.index = order.index(previous_id) if not reordered and previous_id in order else 0
 
   def refresh_preview(self) -> None:
     # Both the elided and the full view come from this one `build_command`
@@ -225,9 +284,17 @@ class MainScreen(Screen):
     # "escape" is the owner-approved way out of the URL input: it produces
     # no printable character, so Input never claims it the way it claims
     # every letter (see MainScreen.BINDINGS), and it is always reachable.
-    # Un-focusing (rather than moving focus to the next widget) is the
-    # simplest thing that reliably unblocks "a" at the Screen level.
-    self.set_focus(None)
+    #
+    # Focus moves to the preset list rather than being dropped with
+    # `set_focus(None)`. Dropping it did unblock the letter keys, but it left
+    # *nothing* focused, so `↑↓` reached no widget and `⏎` had no handler --
+    # the two keys LEGEND_INPUT_BLURRED promises in exactly that state. The
+    # only route to a non-default preset was two undocumented `tab` presses,
+    # and there was no keyboard route to start a download at all. `ListView`
+    # does not override `check_consume_key`, so the letter keys stay live with
+    # it focused (verified by real keypresses in
+    # tests/test_main_screen_focus_presets.py).
+    self.set_focus(self.query_one("#preset-list", ListView))
 
   async def _probe(self, url: str) -> None:
     result = await probe(url, ytdlp=self.app.tooling.ytdlp or "yt-dlp")
