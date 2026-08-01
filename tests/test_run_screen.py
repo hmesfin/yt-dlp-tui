@@ -1,32 +1,28 @@
 """Coverage for the run screen: event rendering, the log cap, cancellation, and
 the guarantee that no download outlives the TUI.
 
-Two things about this file are deliberate and load-bearing:
+Two things here are load-bearing:
 
-1. **Nothing here may spawn a real `yt-dlp` or touch the network.** This is the
+1. **Nothing may spawn a real `yt-dlp` or touch the network.** This is the
    first screen that runs subprocesses on purpose, so the guarantee is
    structural rather than per-test discipline (an earlier round of
-   `test_main_screen.py` leaked two real `yt-dlp -J` invocations out of a
-   single un-guarded keystroke). The autouse `_guarded_run` fixture replaces
-   the `run` name that `screens/run.py` resolves at call time with a wrapper
-   that records the argv and only ever delegates to the real runner when
-   `argv[0]` is this interpreter. Any other argv -- notably the real
-   `app.current_command()`, which starts with `yt-dlp` -- yields an empty
-   event stream and spawns nothing. The autouse `_stub_probe` fixture does
-   the same job for the `MainScreen` that is always mounted underneath.
+   `test_main_screen.py` leaked two real `yt-dlp -J` invocations out of one
+   un-guarded keystroke). The autouse `_guarded_run` fixture replaces the
+   `run` name `screens/run.py` resolves at call time; it only delegates to the
+   real runner when `argv[0]` is this interpreter, and records everything
+   else. `_stub_probe` does the same for the `MainScreen` underneath.
 
 2. **Every "the run was cancelled" assertion checks the process, not the UI
    text.** `tests/test_runner.py` established the technique: the child prints
-   its own pid, and the test polls `os.kill(pid, 0)` until
-   `ProcessLookupError`. A test that only asserts `#stage` says "cancelled"
-   passes just as happily on code that leaves an orphaned yt-dlp downloading
-   in the background, which is the exact failure this screen exists to
-   prevent (the runner spawns with `start_new_session=True`, so nothing else
-   -- not the terminal's Ctrl-C, not SIGHUP -- will ever signal that child).
+   its pid and the test polls `os.kill(pid, 0)` until `ProcessLookupError`. A
+   test that only asserts `#stage` says "cancelled" passes just as happily on
+   code that leaves an orphaned yt-dlp downloading in the background -- and
+   the runner spawns with `start_new_session=True`, so nothing else (not the
+   terminal's Ctrl-C, not SIGHUP) will ever signal that child.
 
-Textual 8.2.8 notes, same as the other screen tests: `app.query_one` never
-searches a pushed screen (use `app.screen.query_one`), and `Static` exposes
-what `.update()` stored as `.content`, not `.renderable`.
+Textual 8.2.8, same as the other screen tests: `app.query_one` never searches
+a pushed screen (use `app.screen.query_one`), and `Static` exposes what
+`.update()` stored as `.content`, not `.renderable`.
 """
 
 import asyncio
@@ -64,6 +60,17 @@ ANNOUNCE_AND_SLEEP = (
   "import os, time\nprint(f'up {os.getpid()}', flush=True)\nwhile True: time.sleep(0.05)\n"
 )
 
+# The same, but deaf to SIGTERM -- the runner then has to sit out its whole
+# SIGTERM grace period and escalate to SIGKILL, which takes many event-loop
+# turns instead of one. yt-dlp installs its own SIGTERM handling, so this is
+# the realistic shape of a stubborn child rather than a contrived one.
+SIGTERM_DEAF = (
+  "import os, signal, time\n"
+  "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+  "print(f'up {os.getpid()}', flush=True)\n"
+  "while True: time.sleep(0.05)\n"
+)
+
 
 async def _no_events() -> AsyncIterator[Event]:
   """An empty event stream, used for any argv that is not this interpreter."""
@@ -73,11 +80,9 @@ async def _no_events() -> AsyncIterator[Event]:
 
 @pytest.fixture(autouse=True)
 def _guarded_run(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
-  """Make "this test suite cannot spawn yt-dlp" structural.
-
-  Returns the list of argvs the run screen asked to run, so a test can assert
-  on what *would* have been spawned without spawning it.
-  """
+  """Makes "this file cannot spawn yt-dlp" structural. Returns the argvs the
+  run screen asked to run, so a test can assert on what *would* have been
+  spawned without spawning it."""
   spawned: list[list[str]] = []
   real_run = runner.run
 
@@ -171,9 +176,7 @@ def _reap(pid: int) -> None:
     os.kill(pid, signal.SIGKILL)
 
 
-# --------------------------------------------------------------------------
 # Event rendering (the brief's six, driven through `apply_event` directly)
-# --------------------------------------------------------------------------
 
 
 async def test_progress_event_updates_bar_and_stats() -> None:
@@ -259,15 +262,13 @@ async def test_zero_total_does_not_divide_by_zero() -> None:
     assert screen.query_one("#progress", ProgressBar).progress == 0.0
 
 
-# --------------------------------------------------------------------------
 # A signalled child is not a failed download
-# --------------------------------------------------------------------------
 
 
 async def test_signalled_exit_is_not_reported_as_a_yt_dlp_failure() -> None:
-  """A negative returncode means the child was signalled (-15 == SIGTERM),
-  not that yt-dlp exited 15 or -15. Rendering "failed (exit -15)" would tell
-  the user their download broke when in fact something stopped it."""
+  """A negative returncode means the child was signalled (-15 == SIGTERM), not
+  that yt-dlp exited -15. "failed (exit -15)" would tell the user their
+  download broke when something merely stopped it."""
   app = _make_app()
   async with app.run_test() as pilot:
     screen = await _screen(app, pilot)
@@ -281,9 +282,9 @@ async def test_signalled_exit_is_not_reported_as_a_yt_dlp_failure() -> None:
 
 
 async def test_a_done_event_after_a_user_cancel_reads_as_cancelled() -> None:
-  """The cancel path normally ends the stream without a DoneEvent at all, but
-  the child can also lose the race and exit on its own SIGTERM first. Either
-  way the user pressed `c`, so the run was cancelled, not broken."""
+  """The cancel path normally ends the stream with no DoneEvent at all, but
+  the child can lose the race and exit on its own SIGTERM first. Either way
+  the user pressed `c`: cancelled, not broken."""
   app = _make_app()
   async with app.run_test() as pilot:
     screen = await _screen(app, pilot)
@@ -294,16 +295,30 @@ async def test_a_done_event_after_a_user_cancel_reads_as_cancelled() -> None:
     assert "cancel" in _stage(screen).lower()
 
 
-# --------------------------------------------------------------------------
 # Log caps -- LogEvent.text can be ~1 MiB (runner does not truncate)
-# --------------------------------------------------------------------------
+
+
+async def test_cancelling_a_finished_run_does_not_relabel_it() -> None:
+  """`c` still reaches its binding once the run is over. Overwriting "done"
+  with "cancelled" would tell the user their finished download was aborted."""
+  app = _make_app()
+  async with app.run_test() as pilot:
+    screen = await _screen(app, pilot)
+    screen.apply_event(DoneEvent(returncode=0))
+    await pilot.pause()
+
+    await pilot.press("c")
+    await pilot.pause()
+
+    assert _stage(screen) == "done"
+    assert screen.cancelled is False
 
 
 async def test_an_over_long_log_line_is_capped() -> None:
-  """`runner._pump` drops a line longer than its 1 MiB stream limit but the
-  *tail* of that line still arrives as an ordinary line, so a single
-  `LogEvent` of ~1 MiB is reachable in normal operation. Handing that to a
-  wrapping RichLog is thousands of rendered strips for one line."""
+  """`runner._pump` drops a line past its 1 MiB stream limit, but the *tail*
+  of that line still arrives as an ordinary line -- so a ~1 MiB `LogEvent` is
+  reachable in normal operation, and handing it to a wrapping RichLog is
+  thousands of rendered strips for one line."""
   app = _make_app()
   async with app.run_test() as pilot:
     screen = await _screen(app, pilot)
@@ -329,15 +344,13 @@ async def test_the_log_line_list_is_bounded(monkeypatch: pytest.MonkeyPatch) -> 
     assert screen.log_lines == [f"line {index}" for index in range(7, 12)]
 
 
-# --------------------------------------------------------------------------
 # A real run: events reach the widgets, and cancellation kills the process
-# --------------------------------------------------------------------------
 
 
 async def test_a_real_run_streams_events_into_the_widgets() -> None:
-  """Everything above drives `apply_event` by hand, so all of it would still
-  pass if the worker never consumed the runner at all. This one spawns a real
-  (hermetic) child through the real runner and asserts the widgets moved."""
+  """Everything above drives `apply_event` by hand, so all of it would pass
+  even if the worker never consumed the runner. This spawns a real (hermetic)
+  child through the real runner and asserts the widgets moved."""
   body = (
     'print(\'PROG:{"b":5,"t":10,"s":1024.0,"e":2,"i":1,"n":2,"title":"T"}\', flush=True)\n'
     "print('[download] Destination: a.mp4', flush=True)\n"
@@ -352,9 +365,8 @@ async def test_a_real_run_streams_events_into_the_widgets() -> None:
 
 
 async def test_c_cancels_the_run_and_kills_the_child() -> None:
-  """The keymap ruling: the run screen has no `Input`, so a bare `c` reaches
-  its binding. Proven with a real keypress, and by the child's pid being gone
-  afterwards -- not by `#stage` saying "cancelled"."""
+  """The keymap ruling: no `Input` on this screen, so a bare `c` reaches its
+  binding. Proven with a real keypress and a dead pid, not by `#stage`."""
   app = _make_app()
   pid: int | None = None
   try:
@@ -391,22 +403,35 @@ async def test_escape_goes_back_to_the_main_screen_and_stops_the_run() -> None:
       _reap(pid)
 
 
-async def test_exiting_the_app_leaves_no_orphaned_download() -> None:
+async def test_exiting_the_app_leaves_no_orphaned_download(monkeypatch: pytest.MonkeyPatch) -> None:
   """The responsibility the runner's `start_new_session=True` created and
   handed to this screen: the child is in its own session, so the terminal's
   Ctrl-C never reaches it and SIGHUP never reaches it. If the TUI exits
   without closing the run, the download survives as an orphan holding the
-  network and writing to the output file. The app's shutdown must therefore
-  *await* the kill, not merely request it."""
+  network and writing to the output file.
+
+  Two details make this bite where the obvious version does not. Textual's own
+  teardown (`Widget._on_unmount` -> `WorkerManager.cancel_node`) does call
+  `Task.cancel()` on the driving worker, and a cancelled run kills its process
+  group on the way out -- but only if the loop keeps handing it turns. With an
+  ordinary child SIGTERM lands in ~1ms and the incidental turns during
+  shutdown suffice, so deleting the screen's teardown changes nothing. So the
+  child here **ignores SIGTERM** (yt-dlp installs its own handling; a wedged
+  ffmpeg behaves the same), forcing the runner through its grace period and on
+  to SIGKILL -- many loop turns, not one. And the assertion below uses only
+  `time.sleep`, never `await`, so the loop gets **no further turns**: a kill
+  that was requested but not awaited shows up as a live pid.
+  """
+  monkeypatch.setattr(runner, "_TERM_TIMEOUT", 0.5)
   app = _make_app()
   pid: int | None = None
   try:
     async with app.run_test() as pilot:
-      screen = await _screen(app, pilot, _child(ANNOUNCE_AND_SLEEP), autostart=True)
+      screen = await _screen(app, pilot, _child(SIGTERM_DEAF), autostart=True)
       pid = await _child_pid(screen, pilot)
     # The app has fully shut down here: the child must already be gone, not
     # merely scheduled for cancellation.
-    _assert_gone(pid, timeout=2.0)
+    _assert_gone(pid, timeout=0.5)
   finally:
     if pid is not None:
       _reap(pid)
@@ -414,11 +439,10 @@ async def test_exiting_the_app_leaves_no_orphaned_download() -> None:
 
 async def test_events_arriving_after_the_screen_is_popped_do_not_crash() -> None:
   """Textual prunes a screen's children *before* dispatching `Unmount`, so
-  there is a window in which the driving worker is still alive and the
-  widgets it renders into are already gone. Without a guard, the first event
-  in that window raises `NoMatches` inside the worker and takes the app down
-  with it -- on the ordinary "press escape while a download is running"
-  path."""
+  there is a window where the driving worker is alive and the widgets it
+  renders into are gone. Unguarded, the first event in that window raises
+  `NoMatches` inside the worker and takes the app down -- on the ordinary
+  "press escape while a download is running" path."""
   app = _make_app()
   async with app.run_test() as pilot:
     screen = await _screen(app, pilot)
@@ -434,9 +458,7 @@ async def test_events_arriving_after_the_screen_is_popped_do_not_crash() -> None
     assert isinstance(app.screen, MainScreen)
 
 
-# --------------------------------------------------------------------------
 # Wiring from the main screen
-# --------------------------------------------------------------------------
 
 
 async def test_download_pushes_a_run_screen_with_the_current_command(

@@ -170,7 +170,9 @@ class RunScreen(Screen):
     return f"failed (exit {event.returncode}) — press escape for the log"
 
   def action_cancel(self) -> None:
-    if self.cancelled:
+    if self.cancelled or self.finished:
+      # Nothing to cancel once the run is over; replacing "done" with
+      # "cancelled" would misreport a download the user already has.
       return
     self.cancelled = True
     self.query_one("#stage", Static).update("cancelling…")
