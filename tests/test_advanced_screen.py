@@ -262,7 +262,7 @@ async def test_escape_on_drawer_does_not_trigger_main_screens_blur_url(
     await pilot.pause()
     main_screen = app.screen
     assert isinstance(main_screen, MainScreen)
-    blur_calls = []
+    blur_calls: list[bool] = []
     monkeypatch.setattr(main_screen, "action_blur_url", lambda: blur_calls.append(True))
 
     await app.push_screen(AdvancedScreen())
@@ -273,3 +273,108 @@ async def test_escape_on_drawer_does_not_trigger_main_screens_blur_url(
 
     assert blur_calls == []
     assert app.screen is main_screen
+
+
+async def test_pressing_a_after_escape_pushes_the_advanced_screen() -> None:
+  """`MainScreen.action_advanced` (`screens/main.py`) is the only production
+  line this task changes in that file, and it had zero coverage that doesn't
+  replace the real body with a spy: `test_letter_keys_type_into_focused_url_input`
+  and `test_escape_blurs_input_and_frees_the_letter_keys` in
+  `test_main_screen.py` both monkeypatch `action_advanced` away before
+  pressing "a", so they'd keep passing even if the real body were reverted to
+  a `notify()` stub, deleted, or made to push the wrong screen. This drives
+  the actual key sequence a user takes from the main screen -- escape to
+  blur the URL input (freeing the letter keys, per Task 7's ruling), then
+  "a" -- with the real `action_advanced` in place, and asserts a real
+  `AdvancedScreen` ends up on top of the stack."""
+  app = _make_app()
+  async with app.run_test() as pilot:
+    await pilot.pause()
+    await pilot.press("escape")
+    await pilot.press("a")
+    await pilot.pause()
+    assert isinstance(app.screen, AdvancedScreen)
+
+
+async def test_output_dir_expands_tilde() -> None:
+  """`Path("~/Videos")` is not expanded on its own -- yt-dlp runs as a
+  subprocess with no shell, so nothing else would expand it either, and
+  `build_command` would emit a literal `~` directory under the process cwd.
+  `~/...` is the single most likely thing a user types into a directory box,
+  so `action_save` must call `.expanduser()`."""
+  app = _make_app()
+  async with app.run_test() as pilot:
+    await app.push_screen(AdvancedScreen())
+    await pilot.pause()
+    app.screen.query_one("#opt-dir", Input).value = "~/Videos"
+    app.screen.action_save()
+    await pilot.pause()
+    assert app.overrides.output_dir == Path("~/Videos").expanduser()
+    assert "~" not in str(app.overrides.output_dir)
+
+
+async def test_non_positive_height_is_rejected_like_non_numeric() -> None:
+  """`int("-5")`/`int("0")` both parse cleanly, but neither is a usable
+  height cap: `build_command` would emit `-f 'bv*[height<=-5]+ba/b[height<=-5]'`,
+  which no format satisfies, turning a silently-accepted typo into a
+  confusing yt-dlp error at download time instead of at entry. Reject
+  non-positive heights the same way non-numeric ones are rejected."""
+  app = _make_app()
+  async with app.run_test() as pilot:
+    for junk in ("0", "-5"):
+      # `action_save` pops the screen on every call, so each case needs its
+      # own push -- reusing one `AdvancedScreen` across the loop would query
+      # a widget that's no longer on the (popped) stack for the second case.
+      await app.push_screen(AdvancedScreen())
+      await pilot.pause()
+      app.screen.query_one("#opt-height", Input).value = junk
+      app.screen.action_save()
+      await pilot.pause()
+      assert app.overrides.height_cap is None
+
+
+async def test_non_numeric_height_notifies_the_user(monkeypatch: pytest.MonkeyPatch) -> None:
+  """The brief pins "ignored rather than fatal" for a junk height -- ignoring
+  is correct, but silently dropping the value with no feedback is a
+  different failure: the user has no way to know their input vanished."""
+  app = _make_app()
+  async with app.run_test() as pilot:
+    await app.push_screen(AdvancedScreen())
+    await pilot.pause()
+    screen = app.screen
+    notifications: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(
+      screen, "notify", lambda *args, **kwargs: notifications.append((args, kwargs))
+    )
+    screen.query_one("#opt-height", Input).value = "abc"
+    screen.action_save()
+    await pilot.pause()
+    assert app.overrides.height_cap is None
+    assert notifications, "expected a notify() call warning about the dropped height"
+    assert notifications[0][1].get("severity") == "warning"
+
+
+async def test_unterminated_quote_in_extra_args_notifies_the_user(
+  monkeypatch: pytest.MonkeyPatch,
+) -> None:
+  """Worse than the height case: one unterminated quote discards *every*
+  flag the user typed into extra args, and the screen pops on save, so the
+  text is gone and the field reopens empty. The save must still notify what
+  was dropped rather than silently losing the user's input -- the drawer
+  still pops (unauthorized to change save semantics), but the user is told."""
+  app = _make_app()
+  async with app.run_test() as pilot:
+    await app.push_screen(AdvancedScreen())
+    await pilot.pause()
+    screen = app.screen
+    notifications: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(
+      screen, "notify", lambda *args, **kwargs: notifications.append((args, kwargs))
+    )
+    screen.query_one("#opt-extra", Input).value = '--user-agent "unterminated'
+    screen.action_save()
+    await pilot.pause()
+    assert app.overrides.extra_args == ()
+    assert notifications, "expected a notify() call warning about the dropped extra args"
+    assert notifications[0][1].get("severity") == "warning"
+    assert app.screen is not screen  # save still pops -- not authorized to keep it open

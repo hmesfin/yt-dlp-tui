@@ -37,7 +37,7 @@ class AdvancedScreen(Screen):
     # this field. Check `is None` explicitly instead of relying on truthiness.
     height = "" if current.height_cap is None else str(current.height_cap)
     with Vertical():
-      yield Static("Advanced -- ctrl+s save, esc cancel")
+      yield Static("Advanced — ctrl+s save, esc cancel")
       yield Label("Output directory")
       yield Input(value=str(current.output_dir or ""), id="opt-dir")
       yield Label("Max height (e.g. 720)")
@@ -51,20 +51,53 @@ class AdvancedScreen(Screen):
   def _value(self, widget_id: str) -> str:
     return self.query_one(f"#{widget_id}", Input).value.strip()
 
+  def _parse_height(self, raw: str) -> int | None:
+    """Blank means "no cap" and is silent. Anything else that doesn't parse
+    to a positive whole number is dropped -- pinned as "ignored rather than
+    fatal" -- but the user is told, since a silently vanished value is a
+    different (and worse) failure than a rejected one. A non-positive height
+    (`0`, `-5`) parses fine as an int but produces a `-f` selector no format
+    can ever satisfy (`build_command`), so it is rejected the same way."""
+    if not raw:
+      return None
+    try:
+      value = int(raw)
+    except ValueError:
+      value = None
+    if value is not None and value <= 0:
+      value = None
+    if value is None:
+      self.notify(
+        f"Ignoring height {raw!r} — must be a positive whole number.",
+        severity="warning",
+      )
+    return value
+
+  def _parse_extra_args(self, raw: str) -> tuple[str, ...]:
+    """An unterminated quote makes `shlex.split` raise `ValueError`, which
+    would otherwise discard every flag the user typed with no explanation --
+    worse than the height case, since the field is blank again once this
+    pops back to MainScreen. Still degrades to `()` (not authorized to keep
+    the screen open to let the user fix it), but now says so."""
+    try:
+      return tuple(shlex.split(raw))
+    except ValueError:
+      self.notify(
+        f"Ignoring extra args {raw!r} — unbalanced quotes.",
+        severity="warning",
+      )
+      return ()
+
   def action_save(self) -> None:
-    height_raw = self._value("opt-height")
-    try:
-      height = int(height_raw) if height_raw else None
-    except ValueError:
-      height = None  # ignore junk rather than block the user
-    try:
-      extra = tuple(shlex.split(self._value("opt-extra")))
-    except ValueError:
-      extra = ()  # unbalanced quotes
+    height = self._parse_height(self._value("opt-height"))
+    extra = self._parse_extra_args(self._value("opt-extra"))
     directory = self._value("opt-dir")
     audio = self._value("opt-audio")
     self.app.overrides = Overrides(
-      output_dir=Path(directory) if directory else None,
+      # `.expanduser()`: yt-dlp runs as a subprocess with no shell, so a
+      # literal "~/Videos" is never expanded on its own -- it would create a
+      # directory named "~" under the process cwd instead of the user's home.
+      output_dir=Path(directory).expanduser() if directory else None,
       height_cap=height,
       audio_format=audio or None,
       extra_args=extra,
