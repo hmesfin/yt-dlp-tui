@@ -33,6 +33,7 @@ from yt_dlp_tui.command import Overrides
 from yt_dlp_tui.presets import BUILTIN_PRESETS
 from yt_dlp_tui.probe import ProbeResult, Tooling
 from yt_dlp_tui.screens import main as main_screen_module
+from yt_dlp_tui.screens.main import MainBody
 
 OFFLINE_TOOLING = Tooling(ytdlp=None, ffmpeg=None)
 
@@ -257,3 +258,78 @@ async def test_toggle_state_persists_across_url_and_preset_changes() -> None:
     await pilot.pause()
     assert str(preview.content) == shlex.join(app.current_command())
     assert note.display is False
+
+
+# Narrow terminals (final whole-branch review, finding I5)
+
+
+def _rendered(widget: Static) -> str:
+  """Every rendered line of a widget, joined. A `height: 1` widget renders one
+  line however much text it holds, so this shows what was actually cut."""
+  return " ".join(widget.render_line(y).text for y in range(widget.size.height)).strip()
+
+
+async def test_the_elision_note_is_not_cut_off_in_a_narrow_terminal() -> None:
+  """`height: 1` truncated the note mid-phrase at 46 columns
+  (`+4 machine-readable flags hidden · v to`) and dropped it entirely at 30,
+  where the preview is at its most elided and the label matters most. That
+  label is what keeps the shortened command honest; a preview that hides four
+  flags with nothing on screen saying so is the defect the elision was
+  explicitly not allowed to introduce."""
+  app = _make_app()
+  async with app.run_test(size=(46, 30)) as pilot:
+    app.url = "https://example.com/v"
+    await pilot.pause()
+    note = app.screen.query_one("#command-preview-note", Static)
+    assert "v to show all" in _rendered(note)
+
+
+async def test_the_key_legend_keeps_the_always_live_escape_hatch_when_narrow() -> None:
+  """At 30 columns the legend lost `^q quit` -- the one key that works
+  regardless of focus, and the only documented way out while the URL box has
+  the letter keys."""
+  app = _make_app()
+  async with app.run_test(size=(30, 30)) as pilot:
+    await pilot.pause()
+    legend = app.screen.query_one("#key-legend", Static)
+    assert "^q quit" in _rendered(legend)
+
+
+async def test_a_long_probed_title_is_not_truncated_to_one_line() -> None:
+  """`#meta` carries a yt-dlp title, which routinely runs past a terminal
+  width, and `height: 1` cut it with no ellipsis to say so."""
+  title = "A Very Long Video Title That Goes On And On · 12:34 · SomeExtractor"
+  app = _make_app()
+  async with app.run_test(size=(46, 30)) as pilot:
+    await pilot.pause()
+    meta = app.screen.query_one("#meta", Static)
+    meta.update(title)
+    await pilot.pause()
+    assert "SomeExtractor" in _rendered(meta)
+
+
+async def test_the_main_body_scrolls_instead_of_clipping_a_short_terminal() -> None:
+  """`height: auto` only fixes text cut sideways. Below ~32 columns the wrapped
+  content is taller than the screen, and the plain `Vertical` clipped the tail
+  -- the command preview itself was cut mid-URL -- with nothing to indicate it.
+
+  Also pins the constraint that made this change delicate: the scroll container
+  must not be focusable, or `AUTO_FOCUS = "*"` gives it the focus that belongs
+  to `#url-input`, and the whole keymap ruling rests on the URL box having it
+  at launch."""
+  app = _make_app()
+  async with app.run_test(size=(30, 20)) as pilot:
+    app.url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    await pilot.pause()
+    body = app.screen.query_one("#main-body", MainBody)
+    assert body.max_scroll_y > 0
+    assert app.focused is app.screen.query_one("#url-input", Input)
+
+
+async def test_the_main_body_does_not_scroll_at_an_ordinary_size() -> None:
+  """The scrollbar is an overflow affordance, not permanent chrome."""
+  app = _make_app()
+  async with app.run_test(size=(78, 26)) as pilot:
+    app.url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    await pilot.pause()
+    assert app.screen.query_one("#main-body", MainBody).max_scroll_y == 0

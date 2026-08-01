@@ -17,7 +17,7 @@ from typing import ClassVar
 
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import VerticalScroll
 from textual.events import DescendantBlur, DescendantFocus
 from textual.screen import Screen
 from textual.widgets import Header, Input, ListItem, ListView, Static
@@ -44,6 +44,33 @@ LEGEND_INPUT_FOCUSED = "⏎ download · esc for keys · ^q quit"
 # in the state this string describes, so the honest legend and the pinned one
 # are now the same text. Nothing here is reworded for its own sake.
 LEGEND_INPUT_BLURRED = "a advanced · q quit · v full command · ↑↓ preset · ⏎ download"
+
+
+class MainBody(VerticalScroll, can_focus=False):
+  """The screen's content column, scrollable rather than clipped.
+
+  `height: auto` on the text widgets fixes text cut off *sideways*, but below
+  about 32 columns the wrapped content is simply taller than the terminal, and
+  a plain `Vertical` (`overflow: hidden hidden`) clipped the tail with nothing
+  on screen to say so -- the command preview itself was cut mid-URL. A scroll
+  container puts a scrollbar there instead, so the content is reachable and
+  visibly incomplete rather than invisibly truncated.
+
+  `can_focus=False` is load-bearing, not tidiness. `ScrollableContainer`
+  declares `can_focus=True`, and `App.AUTO_FOCUS = "*"` focuses the first
+  focusable widget at mount -- which would be this container instead of
+  `#url-input`. That would break the premise the entire keymap ruling rests
+  on (the URL box has focus at launch, so letters type rather than fire
+  bindings) and start the legend in the wrong state; verified by running the
+  suite with it focusable, which fails 10 tests.
+
+  The cost of that: the body can be scrolled with the mouse but not the
+  keyboard, since nothing can focus it. Textual still scrolls a focused child
+  into view, so `escape` (focus -> preset list) reaches the middle of the
+  column; a keyboard-only user on a ~30-column terminal cannot scroll past
+  it to the elision note. Strictly better than clipping it with no scrollbar,
+  and short of a focusable container there is no way to have both.
+  """
 
 
 class PresetList(ListView):
@@ -110,7 +137,7 @@ class MainScreen(Screen):
 
   def compose(self) -> ComposeResult:
     yield Header()
-    with Vertical():
+    with MainBody(id="main-body"):
       # A separate Static from #meta, deliberately: #meta is owned by the
       # probe path (on_input_changed clears it on every keystroke, _probe
       # overwrites it once a lookup resolves), so anything written there at
