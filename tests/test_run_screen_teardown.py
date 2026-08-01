@@ -39,6 +39,7 @@ from collections.abc import AsyncIterator, Callable
 import pytest
 from textual.pilot import Pilot
 from textual.widgets import ProgressBar, Static
+from textual.worker import WorkerFailed
 
 from yt_dlp_tui import runner
 from yt_dlp_tui.app import YtDlpTuiApp
@@ -64,6 +65,16 @@ ANNOUNCE_AND_SLEEP = (
 # lands in about a millisecond and almost any teardown looks correct. yt-dlp
 # installs its own SIGTERM handling and a wedged ffmpeg behaves the same way,
 # so this is the realistic stubborn child, not a contrived one.
+# Announces its pid, emits enough further lines for a renderer crash to have
+# something to crash on, then refuses to end.
+ANNOUNCE_THEN_CHATTER = (
+  "import os, time\n"
+  "print(f'up {os.getpid()}', flush=True)\n"
+  "for i in range(8):\n"
+  "  print(f'line {i}', flush=True)\n"
+  "while True: time.sleep(0.05)\n"
+)
+
 SIGTERM_DEAF = (
   "import os, signal, time\n"
   "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
@@ -136,10 +147,17 @@ def _alive(pid: int) -> bool:
   return True
 
 
-async def _child_pid(screen: RunScreen, pilot: Pilot) -> int:
+async def _announced_pid(screen: RunScreen, pilot: Pilot) -> int:
+  """The pid the child printed on its first line of output."""
   await _settle(pilot, lambda: any(line.startswith("up ") for line in screen.log_lines))
   line = next(line for line in screen.log_lines if line.startswith("up "))
-  pid = int(line.split()[1])
+  return int(line.split()[1])
+
+
+async def _child_pid(screen: RunScreen, pilot: Pilot) -> int:
+  """As above, plus the precondition every cancellation test depends on: the
+  child is still running, so a later "it is gone" assertion means something."""
+  pid = await _announced_pid(screen, pilot)
   assert _alive(pid), "the child was already gone before the test did anything"
   return pid
 
@@ -314,3 +332,83 @@ async def test_cancelling_then_quitting_leaves_no_orphaned_download(
   finally:
     if pid is not None:
       _reap(pid)
+
+
+# A crash in the driver must still end the app loudly
+
+
+class _DriverBug(Exception):
+  """Stands in for a bug in `apply_event` -- bad content, a missing widget."""
+
+
+class _CrashingRunScreen(RunScreen):
+  """A run screen whose renderer blows up part-way through a real run."""
+
+  def __init__(self, argv: list[str], crash_on: int = 3) -> None:
+    super().__init__(argv, autostart=True)
+    self.crash_on = crash_on
+    self.seen = 0
+
+  def apply_event(self, event: Event) -> None:
+    self.seen += 1
+    if self.seen == self.crash_on:
+      raise _DriverBug("apply_event blew up")
+    super().apply_event(event)
+
+
+async def test_a_crash_in_the_driver_ends_the_app_and_kills_the_child() -> None:
+  """The driver is a plain `asyncio.Task`, so nothing reports its exception
+  for us -- `RunScreen._on_drive_done` has to do what
+  `run_worker(exit_on_error=True)` did: bring the app down and show the user
+  the traceback.
+
+  That is easy to get subtly wrong, and only on this path.
+  `App._handle_exception` -> `_fatal_error` builds a `rich.traceback.Traceback`
+  from `sys.exc_info()`, so calling it from a done callback (no exception
+  context) raises `ValueError: Value for 'trace' required...` *before*
+  `_fatal_error` closes the message pump: the TUI keeps running with a raw
+  asyncio traceback painted over it. A `run_test`-based test cannot see any of
+  this -- `app._exception` is set either way, so the harness re-raises and the
+  test passes over a hung app. Hence `run_async`, and hence the assertions on
+  `is_running` and on a rendered traceback existing.
+
+  The child assertion is the same run's second job: the crash unwinds through
+  `_drive`'s `finally: await stream.aclose()`, which is the only thing that
+  stops the process group when the driver dies of something other than
+  cancellation.
+  """
+  app = _make_app()
+  observed: dict[str, object] = {}
+
+  async def auto_pilot(pilot: Pilot) -> None:
+    await pilot.pause()
+    await app.push_screen(_CrashingRunScreen(_child(ANNOUNCE_THEN_CHATTER)))
+    await pilot.pause()
+    screen = app.screen
+    assert isinstance(screen, _CrashingRunScreen)
+    # Not `_child_pid`: the crash kills the child so promptly that it may
+    # already be gone by the time this reads the pid line, which is the
+    # outcome under test rather than a broken precondition.
+    observed["pid"] = await _announced_pid(screen, pilot)
+
+    # Deliberately never calls `app.exit()`: the crash has to end the app by
+    # itself. Polls with `asyncio.sleep` rather than `pilot.pause()` because
+    # the app may be shutting down underneath us.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and app.is_running:
+      await asyncio.sleep(0.05)
+    observed["still_running"] = app.is_running
+    observed["renderables"] = len(app._exit_renderables)
+    app.exit()  # fallback, so a regression fails the test instead of hanging it
+
+  await app.run_async(headless=True, auto_pilot=auto_pilot)
+
+  pid = observed["pid"]
+  assert isinstance(pid, int)
+  try:
+    assert observed["still_running"] is False, "a crashed driver left the TUI running"
+    assert observed["renderables"], "the user got no traceback for the crash"
+    assert isinstance(app._exception, WorkerFailed)
+    _assert_gone(pid)
+  finally:
+    _reap(pid)

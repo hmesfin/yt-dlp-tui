@@ -38,6 +38,7 @@ import asyncio
 import shlex
 from typing import ClassVar
 
+from textual._context import NoActiveAppError
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.screen import Screen
@@ -124,8 +125,27 @@ class RunScreen(Screen):
     if task.cancelled():
       return
     error = task.exception()
-    if error is not None:
-      self.app._handle_exception(WorkerFailed(error))
+    if error is None:
+      return
+    try:
+      app = self.app
+    except NoActiveAppError:
+      # The screen is already detached from the DOM, so there is no app left
+      # to tell. Raising out of a done callback would only add asyncio noise.
+      return
+    # `_handle_exception` -> `_fatal_error` builds a `rich.traceback.Traceback`
+    # with no explicit trace, which reads `sys.exc_info()`. `Worker._run` calls
+    # it from inside `except Exception as error:` so that works there; a done
+    # callback has no exception context, and the Traceback constructor raises
+    # `ValueError: Value for 'trace' required if not called in except: block`
+    # -- *before* `_fatal_error` reaches `_close_messages_no_wait()`. The app
+    # then never shuts down, and asyncio's default handler paints the raw
+    # ValueError over the running TUI. Re-raising here restores the exception
+    # context the call needs, and keeps the real traceback the user should see.
+    try:
+      raise error
+    except BaseException:  # noqa: BLE001 - deliberately re-caught to set sys.exc_info()
+      app._handle_exception(WorkerFailed(error))
 
   async def _drive(self) -> None:
     stream = run(self.argv)
