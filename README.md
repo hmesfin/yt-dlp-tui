@@ -38,8 +38,10 @@ distro-packaged yt-dlp goes stale within weeks and stops working against
 YouTube. Running through `uv` uses the pinned one.
 
 At startup the app checks for both binaries on PATH and shows a warning above
-the URL box if either is missing — before you pick a preset that needs it,
-not after a download fails partway through.
+the URL box if either is missing, so you find out before you pick a preset
+that needs one. The presets that need `ffmpeg` stay selectable either way —
+they'll run and fail partway through the download. Disabling them is not
+implemented yet.
 
 ## Run it
 
@@ -74,7 +76,10 @@ focus, and switches to `a advanced · q quit · v full command · ↑↓ preset 
 ⏎ download` once `escape` has left it.
 
 In the advanced drawer: `ctrl+s` saves, `escape` cancels.
-On the run screen: `c` cancels the download, `escape` goes back.
+
+On the run screen, `c` cancels the download and stays; `escape` cancels it and
+returns to the main screen. There is no way to leave a download running with
+nothing on screen showing it — you could not see it, cancel it, or find it.
 
 Cancelling kills yt-dlp and everything it spawned, including ffmpeg. Quitting
 the app while a download runs does the same.
@@ -107,9 +112,18 @@ args = ["-x", "--audio-format", "flac"]
 output_template = "%(title)s.%(ext)s"
 ```
 
+`id` is free-form; it only has to be unique. Two of the advanced overrides
+edit a flag your preset already has rather than adding one, so they do nothing
+on a preset that lacks it: the max-height cap rewrites `-f`, and the audio
+format rewrites `--audio-format`.
+
+A config file that doesn't parse, or a preset missing `id`, `name` or `args`,
+is reported in the warning line above the URL box; the app falls back to the
+built-in presets rather than refusing to start.
+
 Downloads go to `~/Videos` unless you override the output directory in the
 advanced drawer. The playlist archive lives at
-`~/.local/share/yt-dlp-tui/archive.txt`.
+`~/.local/share/yt-dlp-tui/archive.txt` (created at startup).
 
 ## Development
 

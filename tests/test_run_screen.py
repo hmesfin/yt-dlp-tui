@@ -360,3 +360,35 @@ async def test_download_with_a_blank_url_says_so_instead_of_doing_nothing(
 
     assert app.screen is main_screen
     assert _guarded_run == []
+
+
+# Labels that describe what the key/message actually does (final review minors)
+
+
+async def test_escape_is_labelled_as_a_cancel_not_merely_as_going_back() -> None:
+  """`escape` sets `cancelled = True` and pops, which unmounts the screen and
+  stops the run -- it kills the download, exactly like `c`, and only differs
+  in leaving the screen too. The footer said "back" and the README said "goes
+  back", so the two keys read as different actions when they are not, and
+  nothing warned that leaving throws the download away."""
+  app = _make_app()
+  async with app.run_test() as pilot:
+    screen = await _screen(app, pilot)
+    # Read the description Textual resolved, not the raw BINDINGS tuple, so
+    # this keeps holding if the entry ever becomes a `Binding` object.
+    binding = screen._bindings.key_to_bindings["escape"][0]
+    assert "cancel" in binding.description.lower()
+
+
+async def test_the_failure_message_does_not_point_at_a_log_already_on_screen() -> None:
+  """It read "press escape for the log". The log is the biggest widget on this
+  screen and is already showing, and `escape` leaves for the main screen --
+  the one place the log is not."""
+  app = _make_app()
+  async with app.run_test() as pilot:
+    screen = await _screen(app, pilot)
+    screen.apply_event(DoneEvent(returncode=1))
+    await pilot.pause()
+    stage = _stage(screen)
+    assert "failed (exit 1)" in stage
+    assert "escape" not in stage.lower()

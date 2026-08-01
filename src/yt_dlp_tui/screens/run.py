@@ -79,8 +79,16 @@ class RunScreen(Screen):
   # focus but only binds scroll keys and does not override
   # `check_consume_key`). No `priority=True` anywhere, per the owner's keymap
   # ruling.
+  # "escape" is labelled for what it does, not for where it goes. It sets
+  # `cancelled = True` and pops, and popping unmounts this screen, which stops
+  # the run (`on_unmount` -> `stop_run`) -- so it kills the download exactly
+  # like `c` does and additionally leaves the screen. Labelled "back" it read
+  # as a different, harmless action, and a user stepping out to check the URL
+  # lost the download with no warning. The *behaviour* is right (see
+  # `action_back` for why a run with nothing rendering it must not continue);
+  # only the label was wrong.
   BINDINGS: ClassVar[list[tuple[str, str, str]]] = [
-    ("escape", "back", "back"),
+    ("escape", "back", "cancel & back"),
     ("c", "cancel", "cancel"),
   ]
 
@@ -232,7 +240,10 @@ class RunScreen(Screen):
       # is not an exit status, and calling it a failure would blame yt-dlp for
       # something that stopped it.
       return f"stopped by signal {-event.returncode}"
-    return f"failed (exit {event.returncode}) — press escape for the log"
+    # Not "press escape for the log": the log is the largest widget on this
+    # screen and is already showing, and `escape` leaves for the main screen,
+    # which is the one place it is not.
+    return f"failed (exit {event.returncode}) — see the log below"
 
   def action_cancel(self) -> None:
     if self.cancelled or self.finished:
