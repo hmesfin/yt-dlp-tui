@@ -17,12 +17,28 @@ from typing import ClassVar
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.events import DescendantBlur, DescendantFocus
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
+from textual.widgets import Header, Input, ListItem, ListView, Static
 
+from yt_dlp_tui.command import elide_machinery
 from yt_dlp_tui.probe import preflight_warnings, probe
 from yt_dlp_tui.screens.advanced import AdvancedScreen
 from yt_dlp_tui.screens.run import RunScreen
+
+# Task 11: `MainScreen`'s own `Footer` always rendered empty. `AUTO_FOCUS`
+# puts focus on `#url-input` at mount, `Input.check_consume_key` claims every
+# printable character (see the BINDINGS comment below), and
+# `Screen._binding_chain` strips a claimed key out of every ancestor's
+# binding map before `Footer` ever sees it -- so `a`/`q` never showed up
+# there, mount or not. A legend that just states the keys live in `BINDINGS`
+# would have the same problem one level removed: it would advertise `a` and
+# `q` while the input is focused and they are dead. These two strings are
+# keyed to the two states the screen actually has (`_refresh_legend` below
+# picks between them off the real focus state, not off mount alone), so the
+# legend can never be truer or falser than the keys underneath it.
+LEGEND_INPUT_FOCUSED = "⏎ download · esc for keys · ^q quit"
+LEGEND_INPUT_BLURRED = "a advanced · q quit · v full command · ↑↓ preset · ⏎ download"
 
 
 class MainScreen(Screen):
@@ -34,11 +50,26 @@ class MainScreen(Screen):
   # no BINDINGS entry for "enter": Input owns it for its own submit action
   # (see on_input_submitted below), and a Screen-level entry for a key an
   # ancestor never actually receives while Input is focused would be dead
-  # weight, not a real affordance.
+  # weight, not a real affordance. "v" (Task 11) is exactly the same story as
+  # "a": printable, so it only reaches this Screen once `escape` has blurred
+  # the input -- that is the documented tradeoff, not a bug to route around.
   BINDINGS: ClassVar[list[tuple[str, str, str]]] = [
     ("escape", "blur_url", ""),
     ("a", "advanced", "advanced"),
+    ("v", "toggle_full_command", "full command"),
   ]
+
+  # Whether the command preview shows the real argv verbatim (True) or the
+  # machinery-elided view (False). Plain instance state, not a `reactive`:
+  # nothing needs to watch it fire on its own, `action_toggle_full_command`
+  # (the only writer) already calls `refresh_preview()` itself, and
+  # `refresh_preview()` (the only reader) is called on every kind of preview
+  # refresh already -- URL edits, preset changes, override saves -- so
+  # storing this on the screen instance (which Task 8/9 never tear down;
+  # `AdvancedScreen`/`RunScreen` are pushed on top and popped, this one
+  # never is) makes the choice persist across all of them for free, with no
+  # flag to thread through `App.watch_*` or any other call site.
+  _show_full_command: bool = False
 
   def compose(self) -> ComposeResult:
     yield Header()
@@ -64,7 +95,29 @@ class MainScreen(Screen):
       yield Static("", id="meta", markup=False)
       yield ListView(id="preset-list")
       yield Static("", id="command-preview", markup=False)
-    yield Footer()
+      # A separate Static from #command-preview, not a second line appended
+      # to the same one: two existing tests
+      # (test_bracketed_text_survives_the_meta_and_preview_statics,
+      # test_an_unbalanced_bracket_does_not_crash_the_app in
+      # test_main_screen.py) compare #command-preview's *rendered* lines
+      # against its stored `.content` with spaces stripped, on the premise
+      # that wrapping only ever inserts line breaks -- it never deletes or
+      # reorders characters. Embedding a literal "\n\n" plus this note in
+      # that same string would still be markup-safe, but it would violate
+      # that premise: `.render_line` never re-emits the "\n" itself (each
+      # wrapped row is its own line), while `.content` would still contain
+      # it, so the two could no longer match. Keeping the elision count and
+      # the "v to show all" hint on their own widget sidesteps that rather
+      # than weakening either test. No user/yt-dlp content here (just the
+      # fixed hint text this module owns), but markup=False anyway, on the
+      # same "nothing on this screen renders with markup on" rule the rest
+      # of this compose follows.
+      yield Static("", id="command-preview-note", markup=False)
+    # Task 11: `Footer` replaced with a Static legend kept in sync with real
+    # focus state by `_refresh_legend` (see `on_descendant_focus`/`_blur`
+    # below) -- see the LEGEND_* comment above for why a plain `Footer` can
+    # never do this correctly here.
+    yield Static(LEGEND_INPUT_FOCUSED, id="key-legend", markup=False)
 
   async def on_mount(self) -> None:
     warnings = preflight_warnings(self.app.tooling, self.app.presets)
@@ -78,6 +131,7 @@ class MainScreen(Screen):
       banner.update(" ".join(warnings))
     await self.refresh_presets()
     self.refresh_preview()
+    self._refresh_legend()
 
   async def refresh_presets(self) -> None:
     # `ListView.clear()`/`.append()`/`.extend()` are only "optionally
@@ -104,8 +158,43 @@ class MainScreen(Screen):
     listing.index = 0
 
   def refresh_preview(self) -> None:
+    # Both the elided and the full view come from this one `build_command`
+    # result (via `App.current_command()`) -- never two separate calls. The
+    # spec's invariant is that the command shown is the command that runs;
+    # deriving both views from the same argv is what keeps that true even
+    # when `extra_args`, the preset, or the URL change underneath the toggle.
     cmd = self.app.current_command()
-    self.query_one("#command-preview", Static).update(shlex.join(cmd))
+    note = self.query_one("#command-preview-note", Static)
+    if self._show_full_command:
+      text = shlex.join(cmd)
+      note.display = False
+    else:
+      visible, hidden = elide_machinery(cmd)
+      text = shlex.join(visible)
+      # `hidden` is always 4 today (build_command always adds all four
+      # machinery flags), but this stays a real conditional rather than a
+      # hardcoded label: it is what keeps the count honest if that ever
+      # changes, and it is what a hardcoded "+4" would fail to catch.
+      note.display = bool(hidden)
+      if hidden:
+        noun = "flag" if hidden == 1 else "flags"
+        note.update(f"+{hidden} machine-readable {noun} hidden · v to show all")
+    self.query_one("#command-preview", Static).update(text)
+
+  def action_toggle_full_command(self) -> None:
+    self._show_full_command = not self._show_full_command
+    self.refresh_preview()
+
+  def _refresh_legend(self) -> None:
+    input_widget = self.query_one("#url-input", Input)
+    text = LEGEND_INPUT_FOCUSED if input_widget.has_focus else LEGEND_INPUT_BLURRED
+    self.query_one("#key-legend", Static).update(text)
+
+  def on_descendant_focus(self, event: DescendantFocus) -> None:
+    self._refresh_legend()
+
+  def on_descendant_blur(self, event: DescendantBlur) -> None:
+    self._refresh_legend()
 
   async def on_input_changed(self, event: Input.Changed) -> None:
     self.app.url = event.value

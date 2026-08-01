@@ -90,3 +90,39 @@ def build_command(
   cmd += list(overrides.extra_args)
   cmd += ["--", url]  # `--` so a URL beginning with `-` is never parsed as a flag
   return cmd
+
+
+# The pure-plumbing flags `build_command` always adds, named exactly as the
+# spec fixes them: `--newline`, `--no-colors`, and `--progress-template`
+# (which appears twice, once per template above). Four flags on the default
+# preset. This is a name-based allowlist, not a pattern over flag *values* --
+# a `--progress-template` payload is packed with punctuation that could look
+# like almost anything, and matching on its contents instead of the flag
+# name in front of it is exactly how a filter goes from "hides four known
+# flags" to "hides whatever happens to look machine-generated", silently
+# swallowing legitimate `extra_args` a user adds through the advanced drawer.
+MACHINERY_FLAGS = frozenset({"--newline", "--no-colors", "--progress-template"})
+_FLAGS_TAKING_VALUE = frozenset({"--progress-template"})
+
+
+def elide_machinery(cmd: list[str]) -> tuple[list[str], int]:
+  """Split a real argv (as returned by `build_command`) into the flags worth
+  showing and a count of how many machinery flags were dropped.
+
+  This is a filter over the exact argv passed in -- it never re-derives or
+  reassembles a command of its own, so the elided view can never drift from
+  what `build_command` actually produced.
+  """
+  filtered: list[str] = []
+  hidden = 0
+  skip_next = False
+  for token in cmd:
+    if skip_next:
+      skip_next = False
+      continue
+    if token in MACHINERY_FLAGS:
+      hidden += 1
+      skip_next = token in _FLAGS_TAKING_VALUE
+      continue
+    filtered.append(token)
+  return filtered, hidden

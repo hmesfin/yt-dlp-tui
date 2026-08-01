@@ -3,12 +3,14 @@ from pathlib import Path
 import pytest
 
 from yt_dlp_tui.command import (
+  MACHINERY_FLAGS,
   POSTPROCESS_PREFIX,
   PROGRESS_PREFIX,
   Overrides,
   build_command,
+  elide_machinery,
 )
-from yt_dlp_tui.presets import BUILTIN_PRESETS
+from yt_dlp_tui.presets import BUILTIN_PRESETS, Preset
 
 VIDEO = next(p for p in BUILTIN_PRESETS if p.id == "video-mp4")
 AUDIO = next(p for p in BUILTIN_PRESETS if p.id == "audio-m4a")
@@ -130,3 +132,69 @@ def test_every_preset_builds_a_wellformed_command(preset):
   assert cmd[0] == "yt-dlp"
   assert cmd[-1] == URL
   assert "-o" in cmd
+
+
+# elide_machinery -- the command-preview filter (Task 11)
+
+
+def test_elide_machinery_drops_exactly_the_four_named_flags() -> None:
+  cmd = build_command(URL, VIDEO, download_dir=DEST)
+  visible, hidden = elide_machinery(cmd)
+  assert hidden == 4
+  for flag in MACHINERY_FLAGS:
+    assert flag not in visible
+  # Every token removed from `cmd` to get `visible` is accounted for by
+  # `MACHINERY_FLAGS` or a value immediately following one of them -- i.e.
+  # `visible` isn't just "missing the four flags", it's missing *nothing
+  # else*. `list.remove` mutates in place and raises if the flag isn't
+  # there, which is the point: this fails loudly if a flag this test expects
+  # to be machinery was not actually removed.
+  remainder = list(cmd)
+  for token in cmd:
+    if token in MACHINERY_FLAGS:
+      remainder.remove(token)
+  # The two progress-template values are still in `remainder` (only the
+  # flag names were stripped above) but not in `visible`, so strip them the
+  # same way `elide_machinery` does before comparing.
+  templates = [cmd[i + 1] for i, tok in enumerate(cmd) if tok == "--progress-template"]
+  for value in templates:
+    remainder.remove(value)
+  assert visible == remainder
+
+
+def test_elide_machinery_preserves_preset_args_output_template_and_url_in_order() -> None:
+  cmd = build_command(URL, VIDEO, download_dir=DEST)
+  visible, _ = elide_machinery(cmd)
+  assert visible == [
+    "yt-dlp",
+    "-f",
+    "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+    "--merge-output-format",
+    "mp4",
+    "-o",
+    str(DEST / "%(title)s.%(ext)s"),
+    "--",
+    URL,
+  ]
+
+
+def test_elide_machinery_never_touches_extra_args_even_when_unfamiliar() -> None:
+  """The over-filtering trap named in the brief: a flag `elide_machinery` has
+  never heard of must survive untouched, however machine-generated it might
+  look."""
+  cmd = build_command(
+    URL, VIDEO, Overrides(extra_args=("--sleep-requests", "2")), download_dir=DEST
+  )
+  visible, hidden = elide_machinery(cmd)
+  assert hidden == 4  # unchanged: extra_args aren't machinery
+  assert visible[-4:] == ["--sleep-requests", "2", "--", URL]
+
+
+@pytest.mark.parametrize("preset", BUILTIN_PRESETS, ids=lambda p: p.id)
+def test_elide_machinery_hidden_count_matches_real_removed_tokens(preset: Preset) -> None:
+  """Recomputes the expected count independently of `elide_machinery`'s own
+  bookkeeping, across every built-in preset -- not just the default -- so a
+  regression that double-counts or drops a flag has nowhere to hide."""
+  cmd = build_command(URL, preset, download_dir=DEST, archive=Path("/tmp/a.txt"))
+  _, hidden = elide_machinery(cmd)
+  assert hidden == sum(1 for token in cmd if token in MACHINERY_FLAGS)

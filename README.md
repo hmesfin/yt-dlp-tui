@@ -4,7 +4,10 @@ A terminal UI for yt-dlp that puts named presets first, so ordinary downloads
 don't require remembering flags.
 
 The assembled command is always on screen before it runs. That's deliberate —
-the tool should teach the flags rather than hide them.
+the tool should teach the flags rather than hide them. The preview elides the
+four flags that are pure plumbing (`--newline`, `--no-colors`, both
+`--progress-template` pairs) so the flags actually worth learning aren't
+buried in JSON; `v` (after `escape`) reveals the exact command verbatim.
 
 ```
 ┌─ yt-dlp-tui ─────────────────────────────────┐
@@ -18,7 +21,9 @@ the tool should teach the flags rather than hide them.
 │   Playlist  →  audio, archived               │
 │   Data saver  (720p cap)                     │
 ├──────────────────────────────────────────────┤
-│ yt-dlp --newline --no-colors -f 'bv*[ext=…   │
+│ yt-dlp -f 'bv*[ext=mp4]+ba[ext=m4a]/…        │
+│ +4 machine-readable flags hidden · v to      │
+│ show all                                     │
 └──────────────────────────────────────────────┘
 ```
 
@@ -54,7 +59,13 @@ The URL box has focus at launch, so it gets every letter you type. Press
 | `escape` | leave the URL box |
 | `a` | advanced options (after `escape`) |
 | `q` | quit (after `escape`) |
+| `v` | toggle the full, unelided command (after `escape`) |
 | `ctrl+q` | quit, from anywhere |
+
+The bar at the bottom of the main screen always reflects which of these are
+live: it reads `⏎ download · esc for keys · ^q quit` while the URL box has
+focus, and switches to `a advanced · q quit · v full command · ↑↓ preset ·
+⏎ download` once `escape` has left it.
 
 In the advanced drawer: `ctrl+s` saves, `escape` cancels.
 On the run screen: `c` cancels the download, `escape` goes back.
@@ -93,11 +104,6 @@ output_template = "%(title)s.%(ext)s"
 Downloads go to `~/Videos` unless you override the output directory in the
 advanced drawer. The playlist archive lives at
 `~/.local/share/yt-dlp-tui/archive.txt`.
-
-## Not built yet
-
-- The footer legend on the main screen is empty, because the URL box claims the
-  printable keys. The keys above still work; they're just not advertised.
 
 ## Development
 
