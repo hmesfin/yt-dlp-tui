@@ -157,10 +157,22 @@ def detect_tooling(ytdlp: str = "yt-dlp") -> Tooling:
 
 
 def preflight_warnings(tooling: Tooling, presets: tuple[Preset, ...]) -> list[str]:
-  """Human-readable startup problems. Empty list means the environment is fine."""
+  """Human-readable startup problems. Empty list means the environment is fine.
+
+  The ffmpeg message says the presets *will fail*, not that they are
+  "unavailable". The spec asks for "warn and disable"; nothing disables them
+  today -- every ffmpeg-dependent preset stays selectable and runs, then fails
+  partway through the download. Actual disabling is a follow-up (owner
+  ruling), and until it lands the warning has to describe what happens rather
+  than what was intended, or it sends the user hunting for a preset that is
+  sitting right there in the list.
+  """
   warnings: list[str] = []
   if tooling.ytdlp is None:
     warnings.append("yt-dlp not found on PATH — downloads will fail.")
   if tooling.ffmpeg is None and any(p.needs_ffmpeg for p in presets):
-    warnings.append("ffmpeg not found — merge and audio-extract presets are unavailable.")
+    warnings.append(
+      "ffmpeg not found — the merge and audio-extract presets are still "
+      "selectable but will fail partway through the download."
+    )
   return warnings

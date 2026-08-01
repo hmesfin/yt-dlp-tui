@@ -129,7 +129,7 @@ async def test_clicking_a_preset_row_selects_it_without_starting_a_download(
     downloads: list[bool] = []
     monkeypatch.setattr(app.screen, "action_download", lambda: downloads.append(True))
 
-    await pilot.click(f"#preset-{BUILTIN_PRESETS[AUDIO_INDEX].id}")
+    await pilot.click(f"#preset-{AUDIO_INDEX}")  # rows are keyed by position
     await pilot.pause()
 
     assert app.selected_preset == BUILTIN_PRESETS[AUDIO_INDEX]

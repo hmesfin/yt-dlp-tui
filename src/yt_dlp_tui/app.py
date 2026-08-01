@@ -14,7 +14,7 @@ from textual.reactive import reactive
 
 from yt_dlp_tui import config
 from yt_dlp_tui.command import Overrides, build_command
-from yt_dlp_tui.presets import Preset, load_presets, order_for
+from yt_dlp_tui.presets import BUILTIN_PRESETS, Preset, load_presets, order_for
 from yt_dlp_tui.probe import ProbeResult, Tooling, detect_tooling
 from yt_dlp_tui.screens.main import MainScreen
 
@@ -54,9 +54,33 @@ class YtDlpTuiApp(App):
     # raised there would be mounted on the default screen and immediately
     # covered by the one being pushed over it.
     self.startup_warnings: list[str] = []
-    self.presets = presets if presets is not None else load_presets()
+    self.presets = presets if presets is not None else self._load_presets_or_builtins()
     self.tooling = tooling if tooling is not None else detect_tooling()
     self.selected_preset = self.presets[0]
+
+  def _load_presets_or_builtins(self) -> tuple[Preset, ...]:
+    """Read the user's config file, falling back to the built-ins if it is
+    unusable.
+
+    `load_presets` is deliberately left raising -- it is a pure function and a
+    caller wanting the real error should get it. But this caller runs inside
+    `__init__`, before the app has drawn anything, so an unguarded call turned
+    a typo in a hand-written TOML file into a raw traceback that never names
+    the file at fault. The README documents that file and tells people to
+    write presets into it.
+
+    `tomllib.TOMLDecodeError` is a `ValueError` subclass, so bad TOML, a
+    missing `id`/`name`/`args` key (`KeyError`), a `[[preset]]` that is not a
+    table (`TypeError`), and an unreadable or non-UTF-8 file (`OSError`,
+    `UnicodeDecodeError`) are all covered here.
+    """
+    try:
+      return load_presets()
+    except (OSError, ValueError, KeyError, TypeError) as error:
+      self.startup_warnings.append(
+        f"{config.config_path()} could not be read ({error}) — using the built-in presets."
+      )
+      return BUILTIN_PRESETS
 
   @property
   def ordered_presets(self) -> tuple[Preset, ...]:

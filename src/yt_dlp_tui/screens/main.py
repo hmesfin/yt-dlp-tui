@@ -23,6 +23,7 @@ from textual.screen import Screen
 from textual.widgets import Header, Input, ListItem, ListView, Static
 
 from yt_dlp_tui.command import elide_machinery
+from yt_dlp_tui.presets import Preset
 from yt_dlp_tui.probe import preflight_warnings, probe
 from yt_dlp_tui.screens.advanced import AdvancedScreen
 from yt_dlp_tui.screens.run import RunScreen
@@ -135,6 +136,11 @@ class MainScreen(Screen):
   # distinction is the whole fix.
   _preset_order: tuple[str, ...] = ()
 
+  # The presets behind the rows currently mounted, in row order. Rows are keyed
+  # by position (see `refresh_presets`), so this is what turns a row back into
+  # a `Preset`.
+  _rendered_presets: tuple[Preset, ...] = ()
+
   def compose(self) -> ComposeResult:
     yield Header()
     with MainBody(id="main-body"):
@@ -205,17 +211,13 @@ class MainScreen(Screen):
     # `clear()` and a mount back-to-back without awaiting -- which is what an
     # un-awaited call looks like -- lets a second refresh (e.g. from a probe
     # result arriving) mount before the previous `clear()`'s removals have
-    # landed, raising `DuplicateIds` on the reused `preset-<id>` widget ids.
+    # landed, raising `DuplicateIds` on the reused `preset-<n>` widget ids.
     listing = self.query_one("#preset-list", ListView)
     # Read the highlight off the widget rather than `app.selected_preset`:
     # this is what the user can actually see selected right now, and it cannot
     # lag behind a `Highlighted` message that has not been dispatched yet.
-    highlighted = listing.highlighted_child
-    previous_id = (
-      highlighted.id.removeprefix("preset-")
-      if highlighted is not None and highlighted.id is not None
-      else None
-    )
+    previous = self._preset_at(listing.highlighted_child)
+    previous_id = previous.id if previous is not None else None
     await listing.clear()
     # markup=False on the row's Static for the same reason as #meta and
     # #command-preview above: `preset.name` comes out of the user's
@@ -223,9 +225,17 @@ class MainScreen(Screen):
     # rip" renders as "Lossless  rip" with markup on, and a name containing
     # "[/b]" raises MarkupError out of this very call during `on_mount`, so
     # the app never finishes starting.
+    #
+    # Rows are keyed by *position*, not by `preset.id`. The id comes from the
+    # user's config.toml, on which the README places no constraint, and a
+    # Textual widget id must be an identifier: `id = "flac hq"` raised
+    # `BadIdentifier: 'preset-flac hq' is an invalid id` out of this call at
+    # startup, as would a dot or a leading digit. `_rendered_presets` below is
+    # what turns a row back into the preset it stands for.
+    self._rendered_presets = self.app.ordered_presets
     items = [
-      ListItem(Static(preset.name, markup=False), id=f"preset-{preset.id}")
-      for preset in self.app.ordered_presets
+      ListItem(Static(preset.name, markup=False), id=f"preset-{index}")
+      for index, preset in enumerate(self._rendered_presets)
     ]
     await listing.extend(items)
     # `ListView` composed empty and populated here: its own `_on_mount` only
@@ -335,11 +345,24 @@ class MainScreen(Screen):
       self.query_one("#meta", Static).update("(could not read metadata — download may still work)")
     self.app.probe_result = result
 
+  def _preset_at(self, item: ListItem | None) -> Preset | None:
+    """The preset a row stands for, or None for no row / a stale one.
+
+    Reads the row's own position out of its id rather than `ListView.index`:
+    `Highlighted` is a message, so by the time it is dispatched the index may
+    already have moved on, while the row that was highlighted has not.
+    """
+    if item is None or item.id is None:
+      return None
+    index = int(item.id.removeprefix("preset-"))
+    if 0 <= index < len(self._rendered_presets):
+      return self._rendered_presets[index]
+    return None
+
   def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
-    if event.item is None or event.item.id is None:
-      return
-    preset_id = event.item.id.removeprefix("preset-")
-    self.app.selected_preset = next(p for p in self.app.presets if p.id == preset_id)
+    preset = self._preset_at(event.item)
+    if preset is not None:
+      self.app.selected_preset = preset
 
   def action_advanced(self) -> None:
     self.app.push_screen(AdvancedScreen())

@@ -99,14 +99,20 @@ async def test_app_starts_and_shows_presets() -> None:
   async with app.run_test() as pilot:
     await pilot.pause()
     listing = app.screen.query_one("#preset-list", ListView)
+    # Rows are keyed by position, not by `preset.id` -- a preset id read from
+    # the user's config.toml is not required to be a valid widget id (see
+    # tests/test_user_config.py). The order is asserted through the rendered
+    # names, which is what the user actually sees.
     assert [item.id for item in listing.children] == [
-      f"preset-{preset.id}" for preset in BUILTIN_PRESETS
+      f"preset-{index}" for index in range(len(BUILTIN_PRESETS))
+    ]
+    assert [item.query_one(Static).render_line(0).text.strip() for item in listing.children] == [
+      preset.name for preset in BUILTIN_PRESETS
     ]
     # Not just present -- actually highlighted, so the user can see which
     # preset drives the preview on a screen whose whole premise is that.
     assert listing.index == 0
     assert listing.highlighted_child is not None
-    assert listing.highlighted_child.id == f"preset-{BUILTIN_PRESETS[0].id}"
     assert app.selected_preset == BUILTIN_PRESETS[0]
 
 
@@ -132,7 +138,9 @@ async def test_playlist_probe_reorders_presets_and_steers_selection() -> None:
   app = _make_app()
   async with app.run_test() as pilot:
     listing = app.screen.query_one("#preset-list", ListView)
-    before_order = [item.id for item in listing.children]
+    # By rendered name, since row ids are positional and therefore identical
+    # before and after a reorder.
+    before_order = [item.query_one(Static).render_line(0).text for item in listing.children]
 
     app.probe_result = ProbeResult(title="A list", is_playlist=True, playlist_count=20)
     await pilot.pause()
@@ -143,9 +151,9 @@ async def test_playlist_probe_reorders_presets_and_steers_selection() -> None:
     # the exact path that raised DuplicateIds when clear()/append() weren't
     # awaited, so assert the row order changed and landed correctly rather
     # than just trusting the rebuild happened.
-    after_order = [item.id for item in listing.children]
+    after_order = [item.query_one(Static).render_line(0).text for item in listing.children]
     assert after_order != before_order
-    assert after_order[0] in {"preset-playlist-video", "preset-playlist-audio"}
+    assert app.ordered_presets[0].name in after_order[0]
     assert all(p.is_playlist for p in app.ordered_presets[:2])
     # And the reorder has to steer selection, not just the list contents:
     # nothing else moves `selected_preset` off the pre-reorder preset.
