@@ -4,3 +4,9 @@ Screen { layout: vertical; }
 #meta { margin: 0 2; color: $text-muted; height: 1; }
 #preset-list { margin: 1 2; height: auto; max-height: 10; border: round $panel; }
 #command-preview { margin: 0 2 1 2; color: $text-muted; height: auto; }
+
+/* run screen */
+#title { margin: 1 2 0 2; text-style: bold; }
+#counter, #stage { margin: 0 2; color: $text-muted; height: 1; }
+#progress { margin: 1 2; }
+#log { margin: 1 2; height: 1fr; border: round $panel; }
