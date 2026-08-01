@@ -152,3 +152,13 @@ async def probe(url: str, *, ytdlp: str = "yt-dlp", timeout: float = 20.0) -> Pr
 def detect_tooling(ytdlp: str = "yt-dlp") -> Tooling:
   """Locate the binaries the app depends on, once at startup."""
   return Tooling(ytdlp=shutil.which(ytdlp), ffmpeg=shutil.which("ffmpeg"))
+
+
+def preflight_warnings(tooling: Tooling, presets: tuple) -> list[str]:
+  """Human-readable startup problems. Empty list means the environment is fine."""
+  warnings: list[str] = []
+  if tooling.ytdlp is None:
+    warnings.append("yt-dlp not found on PATH — downloads will fail.")
+  if tooling.ffmpeg is None and any(p.needs_ffmpeg for p in presets):
+    warnings.append("ffmpeg not found — merge and audio-extract presets are unavailable.")
+  return warnings

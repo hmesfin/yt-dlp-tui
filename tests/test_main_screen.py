@@ -82,8 +82,8 @@ def _stub_probe(monkeypatch: pytest.MonkeyPatch) -> None:
   monkeypatch.setattr(main_screen_module, "probe", default_fake_probe)
 
 
-def _make_app() -> YtDlpTuiApp:
-  return YtDlpTuiApp(presets=BUILTIN_PRESETS, tooling=OFFLINE_TOOLING)
+def _make_app(tooling: Tooling = OFFLINE_TOOLING) -> YtDlpTuiApp:
+  return YtDlpTuiApp(presets=BUILTIN_PRESETS, tooling=tooling)
 
 
 def _rendered(widget: Static) -> str:
@@ -341,3 +341,47 @@ async def test_an_unbalanced_bracket_does_not_crash_the_app() -> None:
     preview = app.screen.query_one("#command-preview", Static)
     assert _rendered(preview) == str(preview.content).replace(" ", "")
     assert "[/close]" in str(preview.content)
+
+
+# Preflight tool warnings (Task 10)
+
+
+async def test_preflight_warning_shown_at_mount_and_survives_a_probe() -> None:
+  """A regression test for a defect in the original plan: writing the
+  preflight warning into `#meta` does not survive contact with this screen,
+  because `on_input_changed` clears `#meta` on every keystroke and `_probe`
+  overwrites it with the probed title once it resolves -- both of which
+  happen the moment a user types a URL, which is the first thing anyone does.
+  The warning has to live on a widget neither of those paths ever touches, or
+  it is gone exactly when it matters (missing ffmpeg + an audio preset =
+  mid-download failure with no warning ever shown).
+
+  `_make_app()`'s default `OFFLINE_TOOLING` has both binaries missing, so
+  mount should populate `#tool-warning` with both messages. Then this types a
+  URL -- routed through the autouse `_stub_probe` fixture, so no real
+  subprocess runs -- and confirms `#meta` updates (the probe path actually
+  ran) while `#tool-warning` is untouched.
+  """
+  app = _make_app()
+  async with app.run_test() as pilot:
+    await pilot.pause()
+    warning = app.screen.query_one("#tool-warning", Static)
+    assert "yt-dlp" in str(warning.content)
+    assert "ffmpeg" in str(warning.content)
+
+    await pilot.press("a", "b", "c")
+    await pilot.pause()
+
+    meta = app.screen.query_one("#meta", Static)
+    assert "Stubbed Title" in str(meta.content)  # the probe path really ran
+    assert "yt-dlp" in str(warning.content)
+    assert "ffmpeg" in str(warning.content)
+
+
+async def test_no_preflight_warning_when_tooling_is_complete() -> None:
+  tooling = Tooling(ytdlp="/usr/bin/yt-dlp", ffmpeg="/usr/bin/ffmpeg")
+  app = _make_app(tooling)
+  async with app.run_test() as pilot:
+    await pilot.pause()
+    warning = app.screen.query_one("#tool-warning", Static)
+    assert str(warning.content) == ""

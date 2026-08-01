@@ -1,5 +1,6 @@
 # src/yt_dlp_tui/config.py
 """Filesystem locations. Pure path computation, no I/O."""
+
 import os
 from pathlib import Path
 

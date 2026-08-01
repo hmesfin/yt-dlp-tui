@@ -235,7 +235,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "textual", specifier = ">=0.79" },
+    { name = "textual", specifier = ">=8.2.8" },
     { name = "yt-dlp", specifier = ">=2025.1.1" },
 ]
 

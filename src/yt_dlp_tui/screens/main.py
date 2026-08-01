@@ -20,7 +20,7 @@ from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Input, ListItem, ListView, Static
 
-from yt_dlp_tui.probe import probe
+from yt_dlp_tui.probe import preflight_warnings, probe
 from yt_dlp_tui.screens.advanced import AdvancedScreen
 from yt_dlp_tui.screens.run import RunScreen
 
@@ -43,6 +43,14 @@ class MainScreen(Screen):
   def compose(self) -> ComposeResult:
     yield Header()
     with Vertical():
+      # A separate Static from #meta, deliberately: #meta is owned by the
+      # probe path (on_input_changed clears it on every keystroke, _probe
+      # overwrites it once a lookup resolves), so anything written there at
+      # mount is gone the instant the user types the first character of a
+      # URL -- which is the first thing anyone does. A missing-ffmpeg warning
+      # only matters until the user has actually seen it, so it needs a home
+      # neither of those handlers ever touches.
+      yield Static("", id="tool-warning", markup=False)
       yield Input(placeholder="Paste a URL…", id="url-input")
       # markup=False on both: Textual 8 parses content markup in
       # `Static.update`, and both of these carry text we do not control.
@@ -59,6 +67,9 @@ class MainScreen(Screen):
     yield Footer()
 
   async def on_mount(self) -> None:
+    warnings = preflight_warnings(self.app.tooling, self.app.presets)
+    if warnings:
+      self.query_one("#tool-warning", Static).update(" ".join(warnings))
     await self.refresh_presets()
     self.refresh_preview()
 
