@@ -2,7 +2,11 @@
 them -- the same structural approach as the per-module `_stub_probe` fixtures.
 """
 
+from collections.abc import Callable
+
 import pytest
+
+DroppedTokens = Callable[[list[str], list[str]], list[str]]
 
 
 @pytest.fixture(autouse=True)
@@ -24,3 +28,34 @@ def _xdg_dirs_in_tmp(
   base = tmp_path_factory.mktemp("xdg")
   monkeypatch.setenv("XDG_CONFIG_HOME", str(base / "config"))
   monkeypatch.setenv("XDG_DATA_HOME", str(base / "share"))
+
+
+@pytest.fixture
+def dropped_tokens() -> DroppedTokens:
+  """Return the tokens `shown` is missing relative to `full`, in order.
+
+  An oracle for `elide_machinery`, shared by `test_command.py` (which checks
+  the function) and `test_main_screen_legend_preview.py` (which checks what the
+  screen actually renders). It says nothing about *which* tokens should go --
+  the caller asserts that against the spec's named flags -- so a test using it
+  cannot pass by restating the implementation's own filtering rule, which is
+  exactly how the previous pair of tests missed a real defect.
+
+  Also asserts `shown` is a subsequence of `full`: eliding may only ever drop
+  tokens, never reorder or rewrite them, or the shown-equals-run invariant is
+  gone before the count is even considered.
+  """
+
+  def _dropped(full: list[str], shown: list[str]) -> list[str]:
+    remaining = iter(shown)
+    expected = next(remaining, None)
+    missing: list[str] = []
+    for token in full:
+      if token == expected:
+        expected = next(remaining, None)
+      else:
+        missing.append(token)
+    assert expected is None, f"{shown!r} is not a subsequence of {full!r}"
+    return missing
+
+  return _dropped

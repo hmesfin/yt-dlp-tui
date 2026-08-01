@@ -1,11 +1,13 @@
 from pathlib import Path
 
 import pytest
+from conftest import DroppedTokens
 
 from yt_dlp_tui.command import (
-  MACHINERY_FLAGS,
   POSTPROCESS_PREFIX,
+  POSTPROCESS_TEMPLATE,
   PROGRESS_PREFIX,
+  PROGRESS_TEMPLATE,
   Overrides,
   build_command,
   elide_machinery,
@@ -135,31 +137,34 @@ def test_every_preset_builds_a_wellformed_command(preset):
 
 
 # elide_machinery -- the command-preview filter (Task 11)
+#
+# The six tokens the spec fixes as pure plumbing, spelled out here rather than
+# imported from `command.MACHINERY_BLOCK`: these tests have to pin the expected
+# outcome, not the implementation's own notion of it. The two template values
+# are imported, but `test_progress_templates_are_attached_with_defaults` above
+# pins their contents independently.
+EXPECTED_MACHINERY = [
+  "--newline",
+  "--no-colors",
+  "--progress-template",
+  PROGRESS_TEMPLATE,
+  "--progress-template",
+  POSTPROCESS_TEMPLATE,
+]
 
 
-def test_elide_machinery_drops_exactly_the_four_named_flags() -> None:
+def test_elide_machinery_drops_exactly_the_spec_machinery_block(
+  dropped_tokens: DroppedTokens,
+) -> None:
+  """The oracle names the six tokens that must disappear, rather than
+  recomputing them with the implementation's own rule. The version this
+  replaces did the latter -- it rebuilt the expected result by filtering on
+  `MACHINERY_FLAGS` membership, the exact rule under test -- so it could not
+  fail however wrong that rule was."""
   cmd = build_command(URL, VIDEO, download_dir=DEST)
   visible, hidden = elide_machinery(cmd)
+  assert dropped_tokens(cmd, visible) == EXPECTED_MACHINERY
   assert hidden == 4
-  for flag in MACHINERY_FLAGS:
-    assert flag not in visible
-  # Every token removed from `cmd` to get `visible` is accounted for by
-  # `MACHINERY_FLAGS` or a value immediately following one of them -- i.e.
-  # `visible` isn't just "missing the four flags", it's missing *nothing
-  # else*. `list.remove` mutates in place and raises if the flag isn't
-  # there, which is the point: this fails loudly if a flag this test expects
-  # to be machinery was not actually removed.
-  remainder = list(cmd)
-  for token in cmd:
-    if token in MACHINERY_FLAGS:
-      remainder.remove(token)
-  # The two progress-template values are still in `remainder` (only the
-  # flag names were stripped above) but not in `visible`, so strip them the
-  # same way `elide_machinery` does before comparing.
-  templates = [cmd[i + 1] for i, tok in enumerate(cmd) if tok == "--progress-template"]
-  for value in templates:
-    remainder.remove(value)
-  assert visible == remainder
 
 
 def test_elide_machinery_preserves_preset_args_output_template_and_url_in_order() -> None:
@@ -191,10 +196,72 @@ def test_elide_machinery_never_touches_extra_args_even_when_unfamiliar() -> None
 
 
 @pytest.mark.parametrize("preset", BUILTIN_PRESETS, ids=lambda p: p.id)
-def test_elide_machinery_hidden_count_matches_real_removed_tokens(preset: Preset) -> None:
-  """Recomputes the expected count independently of `elide_machinery`'s own
-  bookkeeping, across every built-in preset -- not just the default -- so a
-  regression that double-counts or drops a flag has nowhere to hide."""
+def test_elide_machinery_drops_the_same_block_for_every_preset(
+  preset: Preset, dropped_tokens: DroppedTokens
+) -> None:
+  """`build_command` emits the same six-token machinery block for every
+  preset, so the elided view must too -- including the playlist presets, whose
+  extra `--download-archive` pair sits after it."""
   cmd = build_command(URL, preset, download_dir=DEST, archive=Path("/tmp/a.txt"))
-  _, hidden = elide_machinery(cmd)
-  assert hidden == sum(1 for token in cmd if token in MACHINERY_FLAGS)
+  visible, hidden = elide_machinery(cmd)
+  assert dropped_tokens(cmd, visible) == EXPECTED_MACHINERY
+  assert hidden == 4
+
+
+@pytest.mark.parametrize(
+  "extra",
+  [
+    ("--postprocessor-args", "--no-colors"),
+    ("--progress-template", "MINE:{}"),
+    ("--no-colors",),
+    ("--newline",),
+  ],
+  ids=["machinery-name-as-a-value", "same-flag-again", "bare-flag", "bare-newline"],
+)
+def test_a_users_own_flag_is_never_elided_for_sharing_a_machinery_name(
+  extra: tuple[str, ...], dropped_tokens: DroppedTokens
+) -> None:
+  """Elision is by position, not by token membership. Matching on the token
+  alone reached into `extra_args`: `--postprocessor-args --no-colors` rendered
+  as `--postprocessor-args` with its value gone, and `--progress-template
+  MINE:{}` vanished entirely -- so the command on screen was not the command
+  that ran, which is the one invariant this whole preview exists to hold."""
+  cmd = build_command(URL, VIDEO, Overrides(extra_args=extra), download_dir=DEST)
+  visible, hidden = elide_machinery(cmd)
+  assert visible[-len(extra) - 2 :] == [*extra, "--", URL]
+  assert hidden == 4
+  # And nothing beyond the block went, whatever the extra args happen to be
+  # named -- `visible` losing the right tail is not enough on its own.
+  assert dropped_tokens(cmd, visible) == EXPECTED_MACHINERY
+
+
+def test_elide_machinery_hides_nothing_when_the_block_is_not_where_it_belongs() -> None:
+  """Fail safe toward honesty. `elide_machinery` is documented as a filter over
+  an argv `build_command` produced; handed anything else it must not guess
+  which tokens were plumbing -- showing four extra flags is harmless, hiding a
+  flag that is really running is not."""
+  handmade = ["yt-dlp", "-f", "best", "--newline", "--no-colors", "--", URL]
+  assert elide_machinery(handmade) == (handmade, 0)
+
+
+# User-preset shapes the built-ins never produce (deferred minor, Task 3)
+
+
+def test_a_preset_whose_args_end_in_a_bare_f_does_not_crash_the_override() -> None:
+  """`_replace_flag` did `out[out.index(flag) + 1] = value` with no bounds
+  check. Nothing in `BUILTIN_PRESETS` ends in a valueless flag, but a preset
+  read from the user's config.toml can -- and `build_command` runs on every
+  keystroke, so the IndexError would land in a reactive watcher."""
+  preset = Preset(id="odd", name="Odd", args=("--merge-output-format", "mp4", "-f"))
+  cmd = build_command(URL, preset, Overrides(height_cap=480), download_dir=DEST)
+  # `-f` is still the last of the preset's own args -- nothing was inserted
+  # after it -- and the override simply did not apply.
+  assert cmd[cmd.index("-f") + 1] == "-o"
+  assert "bv*[height<=480]+ba/b[height<=480]" not in cmd
+
+
+def test_a_bare_audio_format_at_the_end_of_a_preset_is_left_alone() -> None:
+  preset = Preset(id="odd-audio", name="Odd audio", args=("-x", "--audio-format"))
+  cmd = build_command(URL, preset, Overrides(audio_format="flac"), download_dir=DEST)
+  assert cmd[cmd.index("--audio-format") + 1] == "-o"
+  assert "flac" not in cmd

@@ -50,10 +50,21 @@ class Overrides:
 
 
 def _replace_flag(args: list[str], flag: str, value: str) -> list[str]:
-  """Replace the value of `flag` in place. Returns args unchanged if absent."""
+  """Replace the value of `flag` in place. Returns args unchanged if absent.
+
+  Also unchanged when `flag` is the last element: a preset read from the
+  user's config.toml can end in a bare `-f`, and an unguarded
+  `out.index(flag) + 1` raises IndexError out of a function the UI calls on
+  every keystroke. No built-in preset has that shape, which is why this went
+  untriggered.
+  """
   out = list(args)
-  if flag in out:
-    out[out.index(flag) + 1] = value
+  if flag not in out:
+    return out
+  index = out.index(flag)
+  if index + 1 == len(out):
+    return out
+  out[index + 1] = value
   return out
 
 
@@ -66,6 +77,16 @@ def build_command(
   download_dir: Path | None = None,
   archive: Path | None = None,
 ) -> list[str]:
+  """Assemble the argv for one download.
+
+  Two overrides only *edit* a flag the preset already has, and are therefore
+  silent no-ops on a preset that does not: `height_cap` needs a `-f` to
+  rewrite, and `audio_format` needs an `--audio-format`. Every built-in preset
+  carries the one its kind needs, so this only reaches a preset written by
+  hand in config.toml -- documented in the README's config section rather than
+  warned about at runtime, because this module is pure and has nothing to warn
+  through.
+  """
   overrides = overrides or Overrides()
   dest = overrides.output_dir or download_dir or config.default_download_dir()
 
@@ -92,17 +113,29 @@ def build_command(
   return cmd
 
 
-# The pure-plumbing flags `build_command` always adds, named exactly as the
-# spec fixes them: `--newline`, `--no-colors`, and `--progress-template`
-# (which appears twice, once per template above). Four flags on the default
-# preset. This is a name-based allowlist, not a pattern over flag *values* --
-# a `--progress-template` payload is packed with punctuation that could look
-# like almost anything, and matching on its contents instead of the flag
-# name in front of it is exactly how a filter goes from "hides four known
-# flags" to "hides whatever happens to look machine-generated", silently
-# swallowing legitimate `extra_args` a user adds through the advanced drawer.
-MACHINERY_FLAGS = frozenset({"--newline", "--no-colors", "--progress-template"})
-_FLAGS_TAKING_VALUE = frozenset({"--progress-template"})
+# The pure-plumbing tokens `build_command` always emits, in the exact order it
+# emits them, immediately after the binary. Four flags, two of which carry a
+# value.
+#
+# A *block* and not a set of flag names, because membership is not the
+# question: `--no-colors` is machinery when it is the second token of a
+# command this module built, and it is the user's own flag when it arrives in
+# `extra_args` from the advanced drawer -- the token is identical either way.
+# Filtering by name reached into `extra_args` and mangled it: a user's
+# `--postprocessor-args --no-colors` rendered as `--postprocessor-args` with
+# its value silently gone, and `--progress-template MINE:{}` disappeared
+# outright, so the command on screen was not the command being run.
+MACHINERY_BLOCK: tuple[str, ...] = (
+  "--newline",
+  "--no-colors",
+  "--progress-template",
+  PROGRESS_TEMPLATE,
+  "--progress-template",
+  POSTPROCESS_TEMPLATE,
+)
+# Flags, not tokens: the two template payloads are values, not flags, and the
+# preview's "+N hidden" label counts flags.
+MACHINERY_FLAG_COUNT = 4
 
 
 def elide_machinery(cmd: list[str]) -> tuple[list[str], int]:
@@ -112,17 +145,14 @@ def elide_machinery(cmd: list[str]) -> tuple[list[str], int]:
   This is a filter over the exact argv passed in -- it never re-derives or
   reassembles a command of its own, so the elided view can never drift from
   what `build_command` actually produced.
+
+  An argv that does not carry `MACHINERY_BLOCK` verbatim at the position
+  `build_command` puts it is returned untouched, with a count of zero. That is
+  the safe direction to fail: showing four flags that could have been hidden
+  costs a line of screen, whereas hiding a token that is really running breaks
+  the invariant the preview exists for.
   """
-  filtered: list[str] = []
-  hidden = 0
-  skip_next = False
-  for token in cmd:
-    if skip_next:
-      skip_next = False
-      continue
-    if token in MACHINERY_FLAGS:
-      hidden += 1
-      skip_next = token in _FLAGS_TAKING_VALUE
-      continue
-    filtered.append(token)
-  return filtered, hidden
+  end = 1 + len(MACHINERY_BLOCK)
+  if tuple(cmd[1:end]) != MACHINERY_BLOCK:
+    return list(cmd), 0
+  return [*cmd[:1], *cmd[end:]], MACHINERY_FLAG_COUNT

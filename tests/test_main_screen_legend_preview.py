@@ -25,6 +25,7 @@ import re
 import shlex
 
 import pytest
+from conftest import DroppedTokens
 from textual.widgets import Input, Static
 
 from yt_dlp_tui.app import YtDlpTuiApp
@@ -58,12 +59,11 @@ def _make_app() -> YtDlpTuiApp:
   return YtDlpTuiApp(presets=BUILTIN_PRESETS, tooling=OFFLINE_TOOLING)
 
 
-def _expected_hidden_count(cmd: list[str]) -> int:
-  """Independent recomputation of how many machinery *flags* a real argv
-  carries: each bare flag counts once, and a value token following
-  `--progress-template` is not itself one of the named flags so it is never
-  double-counted."""
-  return sum(1 for token in cmd if token in _MACHINERY_FLAG_NAMES)
+def _shown_command(app: YtDlpTuiApp) -> list[str]:
+  """The preview parsed back into an argv, so it can be diffed against the real
+  one. `refresh_preview` renders it with `shlex.join`, so `shlex.split` is its
+  exact inverse."""
+  return shlex.split(str(app.screen.query_one("#command-preview", Static).content))
 
 
 async def test_legend_reflects_focus_state_through_escape_and_refocus() -> None:
@@ -169,17 +169,55 @@ async def test_v_types_into_input_while_focused_and_does_not_toggle() -> None:
     assert "machine-readable flags hidden" in str(note.content)
 
 
-async def test_hidden_count_label_reflects_actual_removed_flag_count() -> None:
+async def test_hidden_count_label_reflects_what_the_preview_actually_dropped(
+  dropped_tokens: DroppedTokens,
+) -> None:
+  """The oracle is the difference between the argv that will run and the argv
+  on screen -- not a recomputation of the implementation's filtering rule,
+  which is what the version this replaces did (and why it could not catch the
+  rule being wrong).
+
+  Nothing here names the machinery values, only that four *flags* went and
+  that they are the four the spec fixes; the two remaining dropped tokens are
+  the payloads those flags carry."""
   app = _make_app()
   async with app.run_test() as pilot:
     app.url = "https://example.com/v"
     await pilot.pause()
     note = str(app.screen.query_one("#command-preview-note", Static).content)
 
+    dropped = dropped_tokens(app.current_command(), _shown_command(app))
+    assert [token for token in dropped if token.startswith("--")] == [
+      "--newline",
+      "--no-colors",
+      "--progress-template",
+      "--progress-template",
+    ]
+    assert len(dropped) == 6  # the four flags plus the two template payloads
+
     match = re.search(r"\+(\d+) machine-readable flags? hidden", note)
     assert match is not None
-    shown_count = int(match.group(1))
-    assert shown_count == _expected_hidden_count(app.current_command())
+    assert int(match.group(1)) == 4
+
+
+async def test_a_users_flag_named_like_machinery_still_shows_with_its_value(
+  dropped_tokens: DroppedTokens,
+) -> None:
+  """The shown-equals-run invariant at the level the user sees it. Filtering by
+  token name reached into `extra_args`, so `--postprocessor-args --no-colors`
+  rendered as `--postprocessor-args` with the value stripped -- a command that
+  reads as broken and is not the one being run."""
+  app = _make_app()
+  async with app.run_test() as pilot:
+    app.url = "https://example.com/v"
+    app.overrides = Overrides(extra_args=("--postprocessor-args", "--no-colors"))
+    await pilot.pause()
+
+    shown = _shown_command(app)
+    assert shown[-4:] == ["--postprocessor-args", "--no-colors", "--", "https://example.com/v"]
+    assert len(dropped_tokens(app.current_command(), shown)) == 6
+    note = str(app.screen.query_one("#command-preview-note", Static).content)
+    assert "+4 machine-readable flags hidden" in note
 
 
 async def test_toggle_state_persists_across_url_and_preset_changes() -> None:
